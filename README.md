@@ -13,12 +13,14 @@ You may use Neutrino (Simple) if you already decided you want to work with UDP, 
 The packet payload and a part of the header (containing the packet number) is encrypted using [XChaCha20-Poly1305](https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction). This functionality is provided by the easily portable libsodium project which is available in PHP and in Python via PyNaCl.
 
 # Code Styling
+- Python
   - Type hints for class variables, but none for function variables.
   - Type hints for function arguments and return values.
 	  
 # Requirements: Python
+- Python
   - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
 
-# Requirements: PHP
+- PHP
   - PHP >= 8
