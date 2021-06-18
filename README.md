@@ -16,6 +16,9 @@ The packet payload and a part of the header (containing the packet number) is en
   - Type hints for class variables, but none for function variables.
   - Type hints for function arguments and return values.
 	  
-# Requirements / Dependencies
+# Requirements: Python
   - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
+
+# Requirements: PHP
+  - PHP >= 8
