@@ -12,6 +12,20 @@ You may use Neutrino (Simple) if you already decided you want to work with UDP, 
 # Public-Key Authentication
 The packet payload and a part of the header (containing the packet number) is encrypted using [XChaCha20-Poly1305](https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction). This functionality is provided by the easily portable libsodium project which is available in PHP and in Python via PyNaCl.
 
+# Basic Header Format
+```
+UNPROTECTED(
+	[Protocol Identifier = u32 bit (4 bytes)]
+	[Protocol Version = u8 bit (1 byte)]
+	[Type = u8 bit (1)]
+	[Session ID = u64 bit (8 bytes)]
+)
+
+ENCRYPTED(
+	[Packet Number = u64 bit (8 bytes)]
+)
+```
+
 # Code Styling
 - Python
   - Type hints for class variables, but none for function variables.
