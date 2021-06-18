@@ -3,7 +3,7 @@ Secure and event-driven low-level UDP protocol with focus on simplicity and high
 
 The basic Neutrino class (*Neutrino Simple* or only *Neutrino*) does only offer an event-driven and encrypted server/client scheme using small packets of not more than 1280 bytes. While TCP emulates a stream-based protocol, UDP and thus Neutrino uses a packet-based scheme.
 
-Features such as acknowledgement packets (ACK), ordering packets by their given packet number or allowing large pseudo-packets to bypass the limit are out of scope for the basic class; but are planned to be developed as extended classes.
+Features such as acknowledgement packets (ACK), ordering packets by their given packet number or allowing large pseudo-packets to bypass the limit are out of scope for the basic class; but are planned to be developed as extended classes. Using the basic Neutrino class the server is able to serve thousands of packets per second (~ 4,000-5,000).
 
 # When to use Neutrino?
 
