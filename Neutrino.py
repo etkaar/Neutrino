@@ -35,7 +35,6 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 	  - XChaCha20-Poly1305 (https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction)
 
 '''
-import sys
 import time
 import secrets
 import struct
@@ -46,10 +45,8 @@ import nacl.bindings
 import nacl.secret
 
 from typing import Optional
-from sortedcollections import SortedDict
 
 class Neutrino:
-	
 	"""
 	CONSTANTS
 	"""
@@ -79,9 +76,10 @@ class Neutrino:
 	PACKET_TYPE_CLIENT_HELLO: int = 0x01
 	PACKET_TYPE_SERVER_HELLO: int = 0x02
 	PACKET_TYPE_KEEP_ALIVE: int = 0x03
+	PACKET_TYPE_CLOSE: int = 0x04
 	PACKET_TYPE_DATA: int = 0x40
 	
-	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO, PACKET_TYPE_SERVER_HELLO, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_DATA]
+	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO, PACKET_TYPE_SERVER_HELLO, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_CLOSE, PACKET_TYPE_DATA]
 	
 	# For best network compatibility, we choose a relatively small
 	# UDP packet size; see the QUIC protocol for more information.
@@ -135,8 +133,18 @@ class Neutrino:
 	SESSION_TIMEOUT_PENDING: float = 0.25
 	SESSION_TIMEOUT_ESTABLISHED: float = 1.0
 	
-	# Clients
+	# Max client id size
 	MAX_LOCAL_CLIENT_ID_SIZE: int = 2**64-1
+	
+	# Reconnect timeout after the session expired
+	#
+	# NOTE: Do not lower this too much, otherwise the server
+	# may receive a CLIENT_HELLO and drop it, because the server
+	# did not yet remove the client and assumes it is still connected.
+	CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED: float = 1.0
+	
+	# Reconnect timeout if the previous reconnect attempt was not successful
+	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: float = 3.0
 	
 	"""
 	VARIABLES: CRYPTO
@@ -158,9 +166,6 @@ class Neutrino:
 	# Debug mode 
 	debug = False
 	
-	# Fake network problems
-	fake_lost_packets = False
-	
 	# Endpoint UDP (datagram) socket
 	endpoint = None
 	
@@ -178,6 +183,9 @@ class Neutrino:
 	# Time of the very last packet we sent; used to prevent
 	# unnecessarily KEEP_ALIVE packets.
 	client_last_packet_sent_time: float = 0.0
+	
+	# Calculated time after client tries to reconnect to the server
+	client_reattempt_connection_time: float = 0.0
 	
 	# Used by the client to interact with encrypted packets
 	client_read_key: bytes = None
@@ -199,19 +207,30 @@ class Neutrino:
 	last_tick_time: float = 0.0
 	
 	"""
-	QUEUES
-	"""
-	retained_packets_out: list = []
-	
-	"""
 	DEBUG (Used for debugging purposes)
 	"""
 	PACKET_TYPE_NAMES: dict = {
 		PACKET_TYPE_CLIENT_HELLO: 'CLIENT_HELLO',
 		PACKET_TYPE_SERVER_HELLO: 'SERVER_HELLO',
 		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
+		PACKET_TYPE_CLOSE: 'CLOSE',
 		PACKET_TYPE_DATA: 'DATA'
 	}
+	
+	"""
+	STATISTICS
+	"""
+	packets_read_total: int = 0
+	packets_sent_total: int = 0
+	
+	"""
+	WRITE LOCK
+	"""
+	# [1] In the low-level implementation, an endpoint can never send more packets
+	# per frame as it is able to receive per frame (= 1). If you would send
+	# more packets per frame as you can receive, you may be never able to
+	# receive the packets sent as response from the other endpoint.
+	write_is_locked = False
 
 	"""
 	INITIALIZATION
@@ -249,40 +268,23 @@ class Neutrino:
 	def tests(self) -> None:
 		return
 	
-		# Encode and decode a packet
-		#byte_words = [b'Apfel essen Hunde', b'Banane trinken Fliegen', b'So oder\x00 so']
-		
-		#packet_encoded = self._encrypt_and_encode_packet(packet_type=self.PACKET_TYPE_CLIENT_HELLO, packet_number=1, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=byte_words, padding=-1)
-		#packet_decoded = self._decrypt_and_decode_packet(packet_encoded)
-		
-		#print('packet_encoded', len(packet_encoded), packet_encoded)
-		#print('packet_decoded', len(packet_decoded), packet_decoded)
-	
 	
 	"""
 	LOOP & TICKERS
 	"""
 	# Handles all incoming packets forever
-	def loop(self):
+	def request_frame(self):
+		"""
+		>>WRITE -> Does happen immediately, see self._write()
+		"""
+		self.write_is_locked = False
 		
-		while True:
-		
-			# Trigger event
-			self.event_on_loop_frame()
-		
-			"""
-			::TICKERS
-			"""
-			if self.is_server() is True:
-				self._servers_tick()
-			else:
-				self._clients_tick()
-			
-			"""
-			<<READ
-			"""
-			for (key, mask) in self.selector.select(timeout=0.2):
-				# Receive next UDP packet
+		"""
+		<<READ
+		"""
+		for (key, mask) in self.selector.select(timeout=0.1):
+			# Receive next UDP packet
+			try:
 				try:
 					# <<ANY CLIENT
 					if self.is_server() is True:
@@ -293,63 +295,68 @@ class Neutrino:
 					elif self.is_client() is True:
 						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
 						self._register_server_packet(len(raw_packet), packet_type, packet_number, session_id, payload_words)
-				
-				# Silently drop and trigger event
-				except Neutrino.Instruction.DropThisPacket as message:
-					self.event_on_packet_dropped(message)
+				# Drop unexpected packets
+				except Neutrino.NetworkError.UnexpectedPacket as message:
+					raise Neutrino.Instruction.DropThisPacket(message)
 			
-			"""
-			>>WRITE
-			"""
-			# Hold packets back as long the session to the server is not established
-			if (self.is_server() is True) or (self.is_client() is True and self.is_this_client_authenticated_to_server() is True):
-				
-				# All packets
-				while len(self.retained_packets_out) > 0:
-					# Earliest retained packet
-					(client_id, raw_packet) = self.retained_packets_out.pop(0)
-					
-					try:
-						if self.is_server() is True:
-							remote_addr_pair = self._get_client_addr_by_client_id(client_id)
-						elif self.is_client() is True:
-							remote_addr_pair = (self.host, self.port)
-					except Neutrino.ClientError.NotFoundError:
-						raise Neutrino.ClientError.NotFoundError
-					else:
-						self._write(remote_addr_pair, raw_packet)
+			# Silently drop and trigger event
+			except Neutrino.Instruction.DropThisPacket as message:
+				self.event_on_packet_dropped(message)
+		
+		"""
+		::TICKERS
+		"""
+		if self.is_server() is True:
+			self._servers_tick()
+		else:
+			self._clients_tick()
+			
+		# Trigger event
+		self.event_on_requested_frame()
 
+	# Default: Five times per second
 	def _servers_tick(self):
-		# Five times per second
 		if self.last_tick_time + self.SERVERS_TICK_TIME < time.time():
 			self.last_tick_time = time.time()
 			
+			print('self.packets_read_total', self.packets_read_total)
+			print('self.packets_sent_total', self.packets_sent_total)
+			
 			# Remove all timed out client connections
 			self._remove_all_timed_out_clients()
-		
+	
+	# Default: Five times per second
 	def _clients_tick(self):
-		# Five times per second
 		if self.last_tick_time + self.CLIENTS_TICK_TIME < time.time():
 			self.last_tick_time = time.time()
 			
 			# Invalidate session once expired
-			if self.client_local_session_expire_time < time.time():
+			if self.client_local_session_expire_time > 0 and self.client_local_session_expire_time < time.time():
 				self.client_session_id = None
 				self.client_packet_number = None
 				
+				# Session expired
 				if self.client_local_session_expire_time > 0:
-					print(">>SESSION TO SERVER EXPIRED")
-				else:
-					print(">>FAILED TO ESTABLISH SESSION")
+					# Reset session expire time
+					self.client_local_session_expire_time = 0.0
 					
-				self.client_local_session_expire_time = 0.0
+					# Set timeout for re-establishing connection to the server
+					self.client_reattempt_connection_time = (time.time() + self.CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED)
+					
+				# Failed to establish connection at all
+				else:
+					pass
 			
-			# Authenticate and establish encrypted connection session
-			if self.is_this_client_authenticated_to_server() is False:
-				self.authenticate_to_server()
+			# Establish encrypted session to the server
+			if self.is_this_client_connected_to_server() is False:
+				if self.client_reattempt_connection_time < time.time():
+					self.connect_to_server()
+					
+					# Set timeout for next retry
+					self.client_reattempt_connection_time = (time.time() + self.CLIENT_CONNECTION_TIMEOUT_REATTEMPT)
 			else:
 				# Periodically send KEEP_ALIVE packets to validate the connection
-				if self.client_last_packet_sent_time + (self.SESSION_TIMEOUT_ESTABLISHED) < time.time():
+				if self.client_last_packet_sent_time + (self.SESSION_TIMEOUT_ESTABLISHED - self.CLIENTS_TICK_TIME - 0.05) < time.time():
 					self._client_KEEP_ALIVE()
 		
 		
@@ -603,10 +610,6 @@ class Neutrino:
 		# Get amount of words (u8 bit = 1 byte)
 		(amount_of_byte_words,) = self._unpack('B', payload_bytes[0:1])
 		
-		'''
-		if amount_of_byte_words == 0:
-			raise Neutrino.NetworkError.InvalidPacket('Payload does not contain any words.')
-		'''
 		# Place offset after [Number of Words = u8 bit (1)]
 		offset = 1
 		
@@ -648,7 +651,8 @@ class Neutrino:
 		# maximum for a UDP package which is 64 KiB).
 		#
 		# Throws BlockingIOError in non-blocking mode, if
-		# there are no packets left to read.
+		# there are no packets left to read. Not relevant here,
+		# because we use Pythons DefaultSelector().
 		(raw_packet, remote_addr_pair) = self.endpoint.recvfrom(2**16)
 		
 		raw_packet_size = len(raw_packet)
@@ -658,6 +662,9 @@ class Neutrino:
 		
 		# Decode and validate only unprotected header parts and validate total header size
 		(packet_type, session_id) = self._decode_and_validate_unprotected_packet_header(raw_packet)
+		
+		# Statistics
+		self.packets_read_total += 1
 		
 		return (remote_addr_pair, raw_packet, packet_type, session_id)
 	
@@ -691,13 +698,6 @@ class Neutrino:
 		# Get existing client
 		try:
 			client_id = self._get_client_id_by_addr(client_ip, client_port)
-			'''
-			# Client timed out
-			difference = time.time() - self.client_sessions[client_id]['local_session_expire_time']
-			
-			if difference > 0:
-				raise Neutrino.ClientError.SessionError('Client has timed out {0} ms ago.'.format(int(difference * 1000)))
-			'''
 		# Add client
 		except Neutrino.ClientError.NotFoundError:
 			client_id = self._add_client_id_by_addr(client_ip, client_port)		
@@ -756,7 +756,7 @@ class Neutrino:
 		# Will be lower for pending sessions
 		session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
 
-		if not self.is_this_client_authenticated_to_server():
+		if not self.is_this_client_connected_to_server():
 			session_timeout = self.SESSION_TIMEOUT_PENDING
 		
 		# Precalculate time when the session ends
@@ -786,18 +786,23 @@ class Neutrino:
 	"""
 	# Immediately send to endpoint
 	def _write(self, remote_addr_pair: tuple, raw_packet: bytes) -> int:
+		# See description at [1]
+		if self.write_is_locked is True:
+			raise Neutrino.WritingIsLocked("Can't send multiple packets per frame. Wait for next frame until you send another packet.")
+	
+		self.write_is_locked = True
+	
 		# Sent time of the very last packet
 		if self.is_client() is True:
 			self.client_last_packet_sent_time = time.time()
 		
-		if self.fake_lost_packets is True:
-			if int(time.time()) % 10 == 0:
-				return 0
+		# Statistics
+		self.packets_sent_total += 1
 		
 		return self.endpoint.sendto(raw_packet, remote_addr_pair)
 	
 	# Send packet to any endpoint
-	def _send_packet(self, instantly: bool, client_id: Optional[int], remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_packet(self, client_id: Optional[int], remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
 		# Ensure client_id is given if endpoint is the server
 		if self.is_server() is True and client_id is None:
 			raise Neutrino.LogicError("'client_id' cannot be None if packet is sent to a client.")
@@ -828,13 +833,8 @@ class Neutrino:
 			raw_packet = self._encrypt_encoded_packet(raw_key=raw_key, raw_packet=raw_packet)
 		
 		# Immediately send out to endpoint
-		if instantly is True:
-			self._write(remote_addr_pair, raw_packet)
-		else:
-			# Using the client's id instead of the remote_addr_pair allows us
-			# sending packets even if endpoint addr, but not session id has changed.
-			self._retain_outgoing_packet(client_id, raw_packet)
-			
+		self._write(remote_addr_pair, raw_packet)
+	
 		# Trigger event
 		self.event_on_packet_sent(client_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number, session_id)
 		
@@ -842,15 +842,15 @@ class Neutrino:
 		return (raw_packet, packet_number)
 		
 	# Send packet to a client
-	def _send_to_client(self, instantly: bool, client_id: int, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_to_client(self, client_id: int, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
 		# Get current clients session package number and increase it afterwards
 		packet_number = self._get_servers_client_session_packet_number(client_id=client_id, increase=True)
 		
 		# Send packet to client
-		return self._send_packet(instantly, client_id, None, packet_type, packet_number, session_id, byte_words, padding)
+		return self._send_packet(client_id, None, packet_type, packet_number, session_id, byte_words, padding)
 
 	# Send packet to the server
-	def _send_to_server(self, instantly: bool, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_to_server(self, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
 		packet_number = self.PACKET_NUMBER_PENDING
 		
 		# As long it is not the initial client's HELLO packet
@@ -859,29 +859,28 @@ class Neutrino:
 			packet_number = self._get_clients_packet_number(increase=True)
 		
 		# Send packet to server
-		return self._send_packet(instantly, None, (self.host, self.port), packet_type, packet_number, session_id, byte_words, padding)
+		return self._send_packet(None, (self.host, self.port), packet_type, packet_number, session_id, byte_words, padding)
 		
-	# Put outgoing packet into sending queue
-	def _retain_outgoing_packet(self, client_id: Optional[int], raw_packet: bytes) -> None:
-		self.retained_packets_out.append((client_id, raw_packet))
-		
-		
+	
 	"""
 	CLIENTS
 	"""
-	# Authenticate to the server
-	def authenticate_to_server(self):
+	# Establish session to the server
+	def connect_to_server(self):
 		# Generate new client keypair for each connection attempt
 		self._reload_local_crypto_keys()
 	
-		print(">>authenticate_to_server", self.CLIENT_SESSION_ID_PENDING, self.client_session_id)
 		# Send HELLO packet to server to establish the encrypted connection.
 		# The initial HELLO packet must be padded out to prevent amplification attacks.
-		self._send_to_server(instantly=True, packet_type=self.PACKET_TYPE_CLIENT_HELLO, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=[self.get_local_public_key()], padding=-1)
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=[self.get_local_public_key()], padding=-1)
 	
 	# Send KEEP_ALIVE to server to keep session
 	def _client_KEEP_ALIVE(self):
-		self._send_to_server(instantly=False, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id)
+		self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id)
+		
+	# Close connection to the server
+	def _client_CLOSE(self):
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLOSE, session_id=self.client_session_id)
 	
 	# Pass through all clients and delete all information about clients which timed out
 	def _remove_all_timed_out_clients(self):
@@ -1010,11 +1009,23 @@ class Neutrino:
 		
 	# Generate random client id for local use (64 bit)
 	def _generate_random_local_client_id(self) -> int:
-		return self._get_random_int(0, self.MAX_LOCAL_CLIENT_ID_SIZE)		
+		random_client_id = self._get_random_int(0, self.MAX_LOCAL_CLIENT_ID_SIZE)
+		
+		# This is indeed very unlikely, but just to be sure
+		while random_client_id in self.client_sessions:
+			return self._generate_random_local_client_id()
+			
+		return random_client_id
 		
 	# Generate random session id (64 bit)
 	def _generate_random_client_session_id(self) -> int:
-		return self._get_random_int(self.MIN_SESSION_ID_SIZE, self.MAX_SESSION_ID_SIZE)
+		random_session_id = self._get_random_int(self.MIN_SESSION_ID_SIZE, self.MAX_SESSION_ID_SIZE)
+		
+		# This is indeed very unlikely, but just to be sure
+		while random_session_id in self.client_session_ids:
+			return self._generate_random_client_session_id()
+			
+		return random_session_id
 	
 	# Validate session id
 	def _is_valid_client_session_id(self, session_id: int) -> bool:
@@ -1040,8 +1051,8 @@ class Neutrino:
 	def get_this_client_session_id(self):
 		return self.client_session_id
 	
-	# Check if client endpoint is authenticated to the server
-	def is_this_client_authenticated_to_server(self):
+	# Check if client endpoint is connected to the server
+	def is_this_client_connected_to_server(self):
 		if self.client_session_id is not None:
 			return True
 	
@@ -1049,36 +1060,38 @@ class Neutrino:
 		
 	# Register packet from the server
 	def _register_server_packet(self, raw_packet_length: int, packet_type: int, packet_number: int, session_id: int, payload_words: tuple) -> None:
-		# Server confirms session establishment
-		if packet_type is self.PACKET_TYPE_SERVER_HELLO:
-			if self.is_this_client_authenticated_to_server() is True:
-				raise Neutrino.ClientError.SessionError('This client endpoint is already authenticated.')
-			
-			self.client_session_id = session_id
-			
-			# Send KEEP_ALIVE to implicitly confirm the session establishment;
-			# otherwise the session timeout will not increase and the server
-			# will close the session very soon.
-			self._client_KEEP_ALIVE()
-			
-			# Trigger event
-			self.event_on_authenticated_to_server(self.client_session_id)
+		# Client is connected to the server
+		if self.is_this_client_connected_to_server() is True:
+			# Ensure only packet types specific for established sessions are sent
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA]:
+				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by server (connected).'.format(self._get_int_repr(packet_type)))
+		
+		# Needs to establish connection first
+		else:
+			# Ensure only packet types specific for unestablished sessions are sent
+			if packet_type not in [self.PACKET_TYPE_SERVER_HELLO]:
+				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by server (not connected).'.format(self._get_int_repr(packet_type)))
+				
+			# Server confirms session establishment
+			if packet_type is self.PACKET_TYPE_SERVER_HELLO:
+				self.client_session_id = session_id
+				
+				# Trigger event
+				self.event_on_connected_to_server(self.client_session_id)
 	
 	"""
 	SERVER
 	"""
 	# Register packet from any client
 	def _register_client_packet(self, client_id: int, raw_packet_length: int, packet_type: int, packet_number: int, session_id: int, payload_words: tuple) -> None:
-		# Validate session for connected clients
-		if self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
-			
-			# Send back KEEP_ALIVE packets
-			if packet_type is self.PACKET_TYPE_KEEP_ALIVE:
-				self._send_to_client(instantly=False, client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id)
+		session_state = self.client_sessions[client_id]['session_state']
+
+		# New unconnected clients
+		if session_state is self.INTERNAL_SESSION_STATE_PENDING:
+			# Must only use packet types specific for unconnected clients
+			if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO]:
+				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by unconnected client.'.format(self._get_int_repr(packet_type)))
 				
-		# Unconnected clients
-		else:
-		
 			# Client cannot have a session id yet
 			if session_id is not self.CLIENT_SESSION_ID_PENDING:
 				raise Neutrino.ClientError.SessionError('Unconnected client cannot have a session id yet.')
@@ -1088,7 +1101,6 @@ class Neutrino:
 				raise Neutrino.ClientError.SessionError('Unconnected client cannot have a packet number yet.')
 				
 			# Client initializes connection by sending its public key
-			# NOTE: Blocks any other packets, see [1].
 			if packet_type is self.PACKET_TYPE_CLIENT_HELLO:
 			
 				# Hello packets must be padded out to prevent amplification attacks.
@@ -1119,15 +1131,20 @@ class Neutrino:
 					self.client_session_ids[session_id] = client_id					
 					
 					# Confirm session establishment to client
-					self._send_to_client(instantly=True, client_id=client_id, packet_type=self.PACKET_TYPE_SERVER_HELLO, session_id=session_id)
+					self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_SERVER_HELLO, session_id=session_id)
 					
 					# Trigger event
 					self.event_on_client_session_established(client_id, session_id)
+		
+		# Connected clients
+		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
+			# Must only use packet types specific for connected clients
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA]:
+				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_int_repr(packet_type)))
 			
-			# [1] If client is not connected yet, drop any packages which
-			# are not used only to establish the connection
-			else:
-				raise Neutrino.ClientError.SessionError('Unconnected clients may only transmit their public key.')
+			# Send back KEEP_ALIVE packets
+			if packet_type is self.PACKET_TYPE_KEEP_ALIVE:
+				self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id)
 		
 	"""
 	OTHER
@@ -1169,12 +1186,14 @@ class Neutrino:
 	def _get_int_repr(self, number: int) -> str:
 		return hex(number)
 		
+	
 	"""
 	DEBUG (Used for debugging purposes)
 	"""
 	# Get packet type name (e.g. string "CLIENT_HELLO" for PACKET_TYPE_CLIENT_HELLO)
 	def get_packet_name_by_type(self, packet_type: int) -> str:
 		return self.PACKET_TYPE_NAMES[packet_type]
+	
 	
 	"""
 	EVENTS
@@ -1186,8 +1205,8 @@ class Neutrino:
 		>   def event_*():
 		>      pass
 	"""
-	# On every loop frame
-	def event_on_loop_frame(self) -> None:
+	# On every requested frame
+	def event_on_requested_frame(self) -> None:
 		return
 		
 	# Received any unencrypted packet
@@ -1207,7 +1226,7 @@ class Neutrino:
 		return
 		
 	# Session to server from client established
-	def event_on_authenticated_to_server(self, session_id: int) -> None:
+	def event_on_connected_to_server(self, session_id: int) -> None:
 		return
 		
 	# Client timed out
@@ -1222,6 +1241,9 @@ class Neutrino:
 	Exceptions
 	"""
 	class LogicError(Exception):
+		__module__ = Exception.__module__
+		
+	class WritingIsLocked(Exception):
 		__module__ = Exception.__module__
 		
 	class LimitExceededError(Exception):
@@ -1242,6 +1264,9 @@ class Neutrino:
 	
 	class NetworkError(Exception):
 		class InvalidPacket(Exception):
+			__module__ = Exception.__module__
+			
+		class UnexpectedPacket(Exception):
 			__module__ = Exception.__module__
 	
 	class LocalCryptoError(Exception):
