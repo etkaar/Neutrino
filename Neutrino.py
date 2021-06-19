@@ -22,7 +22,6 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 '''
 
 '''
-
 	Code Styling
 	  - Type hints for class variables, but none for function variables.
 	  - Type hints for function arguments and return values.
@@ -33,8 +32,8 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 
 	Used Encryption
 	  - XChaCha20-Poly1305 (https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction)
-
 '''
+import sys
 import time
 import secrets
 import struct
@@ -46,9 +45,13 @@ import nacl.secret
 
 from typing import Optional
 
+"""
+The basic Neutrino class to be inherited from
+(also referred to as Neutrino Simple)
+"""
 class Neutrino:
 	"""
-	CONSTANTS
+	CONSTANTS: COMMON
 	"""
 	# Little-endian
 	BYTE_ORDER: str = '<'
@@ -223,14 +226,8 @@ class Neutrino:
 	packets_read_total: int = 0
 	packets_sent_total: int = 0
 	
-	"""
-	WRITE LOCK
-	"""
-	# [1] In the low-level implementation, an endpoint can never send more packets
-	# per frame as it is able to receive per frame (= 1). If you would send
-	# more packets per frame as you can receive, you may be never able to
-	# receive the packets sent as response from the other endpoint.
-	write_is_locked = False
+	bytes_read_total: int = 0
+	bytes_sent_total: int = 0
 
 	"""
 	INITIALIZATION
@@ -277,31 +274,30 @@ class Neutrino:
 		"""
 		>>WRITE -> Does happen immediately, see self._write()
 		"""
-		self.write_is_locked = False
 		
 		"""
 		<<READ
 		"""
 		for (key, mask) in self.selector.select(timeout=0.1):
-			# Receive next UDP packet
-			try:
+				# Receive next UDP packet
 				try:
-					# <<ANY CLIENT
-					if self.is_server() is True:
-						(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
-						self._register_client_packet(client_id, len(raw_packet), packet_type, packet_number, session_id, payload_words)
-					
-					# <<SERVER
-					elif self.is_client() is True:
-						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
-						self._register_server_packet(len(raw_packet), packet_type, packet_number, session_id, payload_words)
-				# Drop unexpected packets
-				except Neutrino.NetworkError.UnexpectedPacket as message:
-					raise Neutrino.Instruction.DropThisPacket(message)
-			
-			# Silently drop and trigger event
-			except Neutrino.Instruction.DropThisPacket as message:
-				self.event_on_packet_dropped(message)
+					try:
+						# <<ANY CLIENT
+						if self.is_server() is True:
+							(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
+							self._register_client_packet(client_id, len(raw_packet), packet_type, packet_number, session_id, payload_words)
+						
+						# <<SERVER
+						elif self.is_client() is True:
+							(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
+							self._register_server_packet(len(raw_packet), packet_type, packet_number, session_id, payload_words)
+					# Drop unexpected packets
+					except Neutrino.NetworkError.UnexpectedPacket as message:
+						raise Neutrino.Instruction.DropThisPacket(message)
+				
+				# Silently drop and trigger event
+				except Neutrino.Instruction.DropThisPacket as message:
+					self.event_on_packet_dropped(message)
 		
 		"""
 		::TICKERS
@@ -318,9 +314,6 @@ class Neutrino:
 	def _servers_tick(self):
 		if self.last_tick_time + self.SERVERS_TICK_TIME < time.time():
 			self.last_tick_time = time.time()
-			
-			print('self.packets_read_total', self.packets_read_total)
-			print('self.packets_sent_total', self.packets_sent_total)
 			
 			# Remove all timed out client connections
 			self._remove_all_timed_out_clients()
@@ -665,6 +658,7 @@ class Neutrino:
 		
 		# Statistics
 		self.packets_read_total += 1
+		self.bytes_read_total += raw_packet_size
 		
 		return (remote_addr_pair, raw_packet, packet_type, session_id)
 	
@@ -786,20 +780,18 @@ class Neutrino:
 	"""
 	# Immediately send to endpoint
 	def _write(self, remote_addr_pair: tuple, raw_packet: bytes) -> int:
-		# See description at [1]
-		if self.write_is_locked is True:
-			raise Neutrino.WritingIsLocked("Can't send multiple packets per frame. Wait for next frame until you send another packet.")
-	
-		self.write_is_locked = True
-	
+		# Immediately send out packet
+		bytes_sent = self.endpoint.sendto(raw_packet, remote_addr_pair)
+		
+		# Statistics
+		self.packets_sent_total += 1
+		self.bytes_sent_total += bytes_sent
+		
 		# Sent time of the very last packet
 		if self.is_client() is True:
 			self.client_last_packet_sent_time = time.time()
 		
-		# Statistics
-		self.packets_sent_total += 1
-		
-		return self.endpoint.sendto(raw_packet, remote_addr_pair)
+		return bytes_sent
 	
 	# Send packet to any endpoint
 	def _send_packet(self, client_id: Optional[int], remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
@@ -860,7 +852,7 @@ class Neutrino:
 		
 		# Send packet to server
 		return self._send_packet(None, (self.host, self.port), packet_type, packet_number, session_id, byte_words, padding)
-		
+
 	
 	"""
 	CLIENTS
