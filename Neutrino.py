@@ -166,9 +166,6 @@ class Neutrino:
 	# Defines if this endpoint is a client or server
 	server = False
 	
-	# Debug mode 
-	debug = False
-	
 	# Endpoint UDP (datagram) socket
 	endpoint = None
 	
@@ -237,11 +234,10 @@ class Neutrino:
 		pass
 	
 	# Initialize endpoint with host and port
-	def init(self, host: str, port: int, server: bool=False, debug: bool=False):
+	def init(self, host: str, port: int, server: bool=False):
 		self.host = host
 		self.port = port
 		self.server = server
-		self.debug = debug
 		
 		self.endpoint = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 		
@@ -316,7 +312,7 @@ class Neutrino:
 			self.last_tick_time = time.time()
 			
 			# Remove all timed out client connections
-			self._remove_all_timed_out_clients()
+			self._check_for_timed_out_clients()
 	
 	# Default: Five times per second
 	def _clients_tick(self):
@@ -694,38 +690,10 @@ class Neutrino:
 			client_id = self._get_client_id_by_addr(client_ip, client_port)
 		# Add client
 		except Neutrino.ClientError.NotFoundError:
-			client_id = self._add_client_id_by_addr(client_ip, client_port)		
-		
-		# Will be lower for pending sessions
-		session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
-		
-		# If not existent: Register (but not establish yet) client session.
-		# (The client ip address can still be spoofed)
-		if client_id not in self.client_sessions:
-		
-			# Register client
-			self.client_sessions[client_id] = {
-				# Remote addr
-				'ip': client_ip,
-				'port': client_port,
-				
-				# Session
-				'session_id': None,
-				'session_state': self.INTERNAL_SESSION_STATE_PENDING,
-				
-				# Cryptographic read and write keys derived from the clients
-				# public key. These keys change for every connection.
-				'read_key': b'',
-				'write_key': b'',
-				
-				# Current packet number
-				'packet_number': None
-			}
-			
-			session_timeout = self.SESSION_TIMEOUT_PENDING
-		
-		# Precalculate time when the session ends
-		self.client_sessions[client_id]['local_session_expire_time'] = (time.time() + session_timeout)		
+			client_id = self._register_client(client_ip, client_port)
+		else:
+			# Update precalculated time when the session ends
+			self.client_sessions[client_id]['local_session_expire_time'] = (time.time() + self.SESSION_TIMEOUT_ESTABLISHED)		
 		
 		# Trigger event
 		self.event_on_any_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)		
@@ -875,25 +843,57 @@ class Neutrino:
 		self._send_to_server(packet_type=self.PACKET_TYPE_CLOSE, session_id=self.client_session_id)
 	
 	# Pass through all clients and delete all information about clients which timed out
-	def _remove_all_timed_out_clients(self):
+	def _check_for_timed_out_clients(self):
 		for client_id in list(self.client_sessions):
+			# Session is expired
 			if self.client_sessions[client_id]['local_session_expire_time'] < time.time():
-				# Get client information
-				(client_ip, client_port, session_id) = (self.client_sessions[client_id]['ip'], self.client_sessions[client_id]['port'], self.client_sessions[client_id]['session_id'])
-				
-				# Delete all client information
-				del self.client_sessions[client_id]
-				
-				if session_id is not None:
-					del self.client_session_ids[session_id]
-				
-				del self.client_client_ids[client_ip][client_port]
-				
-				if len(self.client_client_ids[client_ip]) == 0:
-					del self.client_client_ids[client_ip]
+				(client_ip, client_port, session_id) = self._unregister_client(client_id)
 			
 				# Trigger event
 				self.event_on_client_timed_out(client_id, session_id, client_ip, client_port)
+	
+	# Adds a new client
+	def _register_client(self, client_ip: str, client_port: int) -> int:
+		client_id = self._add_client_id_by_addr(client_ip, client_port)
+		
+		self.client_sessions[client_id] = {
+			# Remote addr
+			'ip': client_ip,
+			'port': client_port,
+			
+			# Session
+			'session_id': None,
+			'session_state': self.INTERNAL_SESSION_STATE_PENDING,
+			'local_session_expire_time': (time.time() + self.SESSION_TIMEOUT_PENDING),
+			
+			# Cryptographic read and write keys derived from the clients
+			# public key. These keys change for every connection.
+			'read_key': b'',
+			'write_key': b'',
+			
+			# Current packet number
+			'packet_number': None
+		}
+		
+		return client_id
+	
+	# Destroys client session and removes any other information
+	def _unregister_client(self, client_id: int) -> tuple:
+		# Get client information
+		(client_ip, client_port, session_id) = (self.client_sessions[client_id]['ip'], self.client_sessions[client_id]['port'], self.client_sessions[client_id]['session_id'])
+		
+		# Delete all client information
+		del self.client_sessions[client_id]
+		
+		if session_id is not None:
+			del self.client_session_ids[session_id]
+		
+		del self.client_client_ids[client_ip][client_port]
+		
+		if len(self.client_client_ids[client_ip]) == 0:
+			del self.client_client_ids[client_ip]
+			
+		return (client_ip, client_port, session_id)
 	
 	# Get client id by given addr pair: (ip, port)
 	def _get_client_id_by_addr(self, client_ip: str, client_port: int) -> int:
@@ -1068,6 +1068,11 @@ class Neutrino:
 			if packet_type is self.PACKET_TYPE_SERVER_HELLO:
 				self.client_session_id = session_id
 				
+				# Send KEEP_ALIVE to implicitly confirm the session establishment;
+				# otherwise the session timeout will not increase and the server
+				# will close the session very soon.
+				self._client_KEEP_ALIVE()
+				
 				# Trigger event
 				self.event_on_connected_to_server(self.client_session_id)
 	
@@ -1131,12 +1136,16 @@ class Neutrino:
 		# Connected clients
 		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
 			# Must only use packet types specific for connected clients
-			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA]:
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_CLOSE]:
 				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_int_repr(packet_type)))
 			
 			# Send back KEEP_ALIVE packets
 			if packet_type is self.PACKET_TYPE_KEEP_ALIVE:
 				self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id)
+				
+			# Close connection
+			elif packet_type is self.PACKET_TYPE_CLOSE:
+				self._unregister_client(client_id)
 		
 	"""
 	OTHER
