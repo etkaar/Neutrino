@@ -149,6 +149,10 @@ class Neutrino:
 	# Reconnect timeout if the previous reconnect attempt was not successful
 	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: float = 3.0
 	
+	# Used for the <on_client_unregistered> event
+	CLIENT_UNREGISTER_REASON_CLOSE: int = 0x01
+	CLIENT_UNREGISTER_REASON_TIMEOUT: int = 0x01
+	
 	"""
 	VARIABLES: CRYPTO
 	"""
@@ -833,6 +837,9 @@ class Neutrino:
 		# Send HELLO packet to server to establish the encrypted connection.
 		# The initial HELLO packet must be padded out to prevent amplification attacks.
 		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=[self.get_local_public_key()], padding=-1)
+		
+		# Trigger event
+		self.event_on_connecting_to_server()
 	
 	# Send KEEP_ALIVE to server to keep session
 	def _client_KEEP_ALIVE(self):
@@ -847,10 +854,7 @@ class Neutrino:
 		for client_id in list(self.client_sessions):
 			# Session is expired
 			if self.client_sessions[client_id]['local_session_expire_time'] < time.time():
-				(client_ip, client_port, session_id) = self._unregister_client(client_id)
-			
-				# Trigger event
-				self.event_on_client_timed_out(client_id, session_id, client_ip, client_port)
+				(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
 	
 	# Adds a new client
 	def _register_client(self, client_ip: str, client_port: int) -> int:
@@ -878,7 +882,7 @@ class Neutrino:
 		return client_id
 	
 	# Destroys client session and removes any other information
-	def _unregister_client(self, client_id: int) -> tuple:
+	def _unregister_client(self, reason: int, client_id: int) -> tuple:
 		# Get client information
 		(client_ip, client_port, session_id) = (self.client_sessions[client_id]['ip'], self.client_sessions[client_id]['port'], self.client_sessions[client_id]['session_id'])
 		
@@ -893,6 +897,9 @@ class Neutrino:
 		if len(self.client_client_ids[client_ip]) == 0:
 			del self.client_client_ids[client_ip]
 			
+		# Trigger event
+		self.event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
+		
 		return (client_ip, client_port, session_id)
 	
 	# Get client id by given addr pair: (ip, port)
@@ -1074,7 +1081,7 @@ class Neutrino:
 				self._client_KEEP_ALIVE()
 				
 				# Trigger event
-				self.event_on_connected_to_server(self.client_session_id)
+				self.event_on_has_connected_to_server(self.client_session_id)
 	
 	"""
 	SERVER
@@ -1131,7 +1138,7 @@ class Neutrino:
 					self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_SERVER_HELLO, session_id=session_id)
 					
 					# Trigger event
-					self.event_on_client_session_established(client_id, session_id)
+					self.event_on_new_client_connected(client_id, session_id)
 		
 		# Connected clients
 		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
@@ -1145,7 +1152,7 @@ class Neutrino:
 				
 			# Close connection
 			elif packet_type is self.PACKET_TYPE_CLOSE:
-				self._unregister_client(client_id)
+				self._unregister_client(self.CLIENT_UNREGISTER_REASON_CLOSE, client_id)
 		
 	"""
 	OTHER
@@ -1172,7 +1179,7 @@ class Neutrino:
 		
 	# Random integer between MIN and MAX
 	def _get_random_int(self, min: int, max: int):
-		random = secrets.randbelow(max)
+		random = secrets.randbelow((max + 1))
 		
 		if random < min:
 			return self._get_random_int(min, max)
@@ -1222,16 +1229,20 @@ class Neutrino:
 	def event_on_packet_dropped(self, error_message: str) -> None:
 		return
 		
-	# Session for a client established
-	def event_on_client_session_established(self, client_id: int, session_id: int) -> None:
+	# Session for a new client established
+	def event_on_new_client_connected(self, client_id: int, session_id: int) -> None:
 		return
-		
+	
+	# Client tries to connect to the server
+	def event_on_connecting_to_server(self) -> None:
+		return
+	
 	# Session to server from client established
-	def event_on_connected_to_server(self, session_id: int) -> None:
+	def event_on_has_connected_to_server(self, session_id: int) -> None:
 		return
 		
-	# Client timed out
-	def event_on_client_timed_out(self, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
+	# Client unregistered (due to CLOSE or TIMEOUT)
+	def event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
 		return
 		
 	# Client's host and/or port changed during session lifetime
