@@ -154,6 +154,17 @@ class Neutrino:
 	CLIENT_UNREGISTER_REASON_TIMEOUT: int = 0x01
 	
 	"""
+	CONSTANTS: DEBUG (Used for debugging purposes)
+	"""
+	PACKET_TYPE_NAMES: dict = {
+		PACKET_TYPE_CLIENT_HELLO: 'CLIENT_HELLO',
+		PACKET_TYPE_SERVER_HELLO: 'SERVER_HELLO',
+		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
+		PACKET_TYPE_CLOSE: 'CLOSE',
+		PACKET_TYPE_DATA: 'DATA'
+	}
+	
+	"""
 	VARIABLES: CRYPTO
 	"""
 	local_public_key: bytes = None
@@ -211,24 +222,20 @@ class Neutrino:
 	last_tick_time: float = 0.0
 	
 	"""
-	DEBUG (Used for debugging purposes)
+	VARIABLES: STATISTICS
 	"""
-	PACKET_TYPE_NAMES: dict = {
-		PACKET_TYPE_CLIENT_HELLO: 'CLIENT_HELLO',
-		PACKET_TYPE_SERVER_HELLO: 'SERVER_HELLO',
-		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
-		PACKET_TYPE_CLOSE: 'CLOSE',
-		PACKET_TYPE_DATA: 'DATA'
+	statistics: dict = { 
+		'packets_read_total': 0,
+		'packets_sent_total': 0,
+		
+		'bytes_read_total': 0,
+		'bytes_sent_total': 0
 	}
 	
 	"""
-	STATISTICS
+	VARIABLES: OTHER
 	"""
-	packets_read_total: int = 0
-	packets_sent_total: int = 0
-	
-	bytes_read_total: int = 0
-	bytes_sent_total: int = 0
+	frame_number: int = 0
 
 	"""
 	INITIALIZATION
@@ -258,19 +265,23 @@ class Neutrino:
 		# Invoke tests
 		self.tests()
 		
-	
 	"""
 	TESTS
 	"""
 	def tests(self) -> None:
 		return
 	
-	
 	"""
 	LOOP & TICKERS
 	"""
 	# Handles all incoming packets forever
-	def request_frame(self):
+	def request_frame(self) -> int:
+		self.frame_number += 1
+		
+		# Trigger event
+		if self.event_on_requested_frame(self.frame_number) is not True:
+			return self.frame_number
+			
 		"""
 		>>WRITE -> Does happen immediately, see self._write()
 		"""
@@ -282,15 +293,16 @@ class Neutrino:
 				# Receive next UDP packet
 				try:
 					try:
-						# <<ANY CLIENT
+						client_id = None
+						
+						# Packet from any client
 						if self.is_server() is True:
 							(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
-							self._register_client_packet(client_id, len(raw_packet), packet_type, packet_number, session_id, payload_words)
-						
-						# <<SERVER
+						# Packet from the server
 						elif self.is_client() is True:
 							(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
-							self._register_server_packet(len(raw_packet), packet_type, packet_number, session_id, payload_words)
+					
+						self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
 					# Drop unexpected packets
 					except Neutrino.NetworkError.UnexpectedPacket as message:
 						raise Neutrino.Instruction.DropThisPacket(message)
@@ -307,8 +319,7 @@ class Neutrino:
 		else:
 			self._clients_tick()
 			
-		# Trigger event
-		self.event_on_requested_frame()
+		return self.frame_number
 
 	# Default: Five times per second
 	def _servers_tick(self):
@@ -351,8 +362,7 @@ class Neutrino:
 				# Periodically send KEEP_ALIVE packets to validate the connection
 				if self.client_last_packet_sent_time + (self.SESSION_TIMEOUT_ESTABLISHED - self.CLIENTS_TICK_TIME - 0.05) < time.time():
 					self._client_KEEP_ALIVE()
-		
-		
+	
 	"""
 	CRYPTO KEYS
 	"""	
@@ -460,7 +470,6 @@ class Neutrino:
 	# See: https://tools.ietf.org/id/draft-ietf-quic-transport-06.html#initial-packet-number
 	def _generate_initial_random_packet_number(self):
 		return self._get_random_int(self.INITIAL_PACKET_NUMBER_RANGE_MIN, self.INITIAL_PACKET_NUMBER_RANGE_MAX)
-	
 	
 	"""
 	ENCODING / DECODING
@@ -632,7 +641,6 @@ class Neutrino:
 		
 		return byte_words
 	
-	
 	"""
 	NETWORK: READ
 	"""
@@ -657,8 +665,8 @@ class Neutrino:
 		(packet_type, session_id) = self._decode_and_validate_unprotected_packet_header(raw_packet)
 		
 		# Statistics
-		self.packets_read_total += 1
-		self.bytes_read_total += raw_packet_size
+		self.statistics['packets_read_total'] += 1
+		self.statistics['bytes_read_total'] += raw_packet_size
 		
 		return (remote_addr_pair, raw_packet, packet_type, session_id)
 	
@@ -700,7 +708,7 @@ class Neutrino:
 			self.client_sessions[client_id]['local_session_expire_time'] = (time.time() + self.SESSION_TIMEOUT_ESTABLISHED)		
 		
 		# Trigger event
-		self.event_on_any_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)		
+		self.event_on_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)		
 		
 		return (client_id, session_id, (client_ip, client_port), raw_packet, packet_type, packet_number, payload_words)
 		
@@ -729,7 +737,7 @@ class Neutrino:
 		self.client_local_session_expire_time = (time.time() + session_timeout)
 		
 		# Trigger event
-		self.event_on_any_packet_received(None, session_id, remote_addr_pair, packet_type, packet_number, payload_words)
+		self.event_on_packet_received(None, session_id, remote_addr_pair, packet_type, packet_number, payload_words)
 		
 		return (session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
 		
@@ -756,8 +764,8 @@ class Neutrino:
 		bytes_sent = self.endpoint.sendto(raw_packet, remote_addr_pair)
 		
 		# Statistics
-		self.packets_sent_total += 1
-		self.bytes_sent_total += bytes_sent
+		self.statistics['packets_sent_total'] += 1
+		self.statistics['bytes_sent_total'] += bytes_sent
 		
 		# Sent time of the very last packet
 		if self.is_client() is True:
@@ -800,15 +808,15 @@ class Neutrino:
 		self._write(remote_addr_pair, raw_packet)
 	
 		# Trigger event
-		self.event_on_packet_sent(client_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number, session_id)
+		self.event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number)
 		
 		# Return packet number
 		return (raw_packet, packet_number)
 		
 	# Send packet to a client
 	def _send_to_client(self, client_id: int, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
-		# Get current clients session package number and increase it afterwards
-		packet_number = self._get_servers_client_session_packet_number(client_id=client_id, increase=True)
+		# Get current clients session package number and increment it afterwards
+		packet_number = self._get_servers_client_session_packet_number(client_id=client_id, increment=True)
 		
 		# Send packet to client
 		return self._send_packet(client_id, None, packet_type, packet_number, session_id, byte_words, padding)
@@ -819,13 +827,12 @@ class Neutrino:
 		
 		# As long it is not the initial client's HELLO packet
 		if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO]:
-			# Get current clients package number and increase it afterwards
-			packet_number = self._get_clients_packet_number(increase=True)
+			# Get current clients package number and increment it afterwards
+			packet_number = self._get_clients_packet_number(increment=True)
 		
 		# Send packet to server
 		return self._send_packet(None, (self.host, self.port), packet_type, packet_number, session_id, byte_words, padding)
 
-	
 	"""
 	CLIENTS
 	"""
@@ -983,17 +990,17 @@ class Neutrino:
 			# Trigger event
 			self.event_on_client_addr_change(client_id, old_client_ip, old_client_port, new_client_ip, new_client_port)
 	
-	# Get (and possibly increase) the servers packet number for a specific client session
-	def _get_servers_client_session_packet_number(self, client_id: int, increase: bool=False):
+	# Get (and possibly increment) the servers packet number for a specific client session
+	def _get_servers_client_session_packet_number(self, client_id: int, increment: bool=False):
 		packet_number = self.client_sessions[client_id]['packet_number']
 		
-		if increase is True:
+		if increment is True:
 			self.client_sessions[client_id]['packet_number'] += 1
 			
 		return packet_number
 	
-	# Get (and possibly increase) the clients sending packet number
-	def _get_clients_packet_number(self, increase: bool=False):
+	# Get (and possibly increment) the clients sending packet number
+	def _get_clients_packet_number(self, increment: bool=False):
 		# Generate initial random packet number which is used
 		# for packets sent to the server
 		if self.client_packet_number is None:
@@ -1001,7 +1008,7 @@ class Neutrino:
 			
 		packet_number = self.client_packet_number
 		
-		if increase is True:
+		if increment is True:
 			self.client_packet_number += 1
 			
 		return packet_number
@@ -1058,7 +1065,7 @@ class Neutrino:
 		return False
 		
 	# Register packet from the server
-	def _register_server_packet(self, raw_packet_length: int, packet_type: int, packet_number: int, session_id: int, payload_words: tuple) -> None:
+	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
 		# Client is connected to the server
 		if self.is_this_client_connected_to_server() is True:
 			# Ensure only packet types specific for established sessions are sent
@@ -1087,7 +1094,7 @@ class Neutrino:
 	SERVER
 	"""
 	# Register packet from any client
-	def _register_client_packet(self, client_id: int, raw_packet_length: int, packet_type: int, packet_number: int, session_id: int, payload_words: tuple) -> None:
+	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
 		session_state = self.client_sessions[client_id]['session_state']
 
 		# New unconnected clients
@@ -1108,37 +1115,36 @@ class Neutrino:
 			if packet_type is self.PACKET_TYPE_CLIENT_HELLO:
 			
 				# Hello packets must be padded out to prevent amplification attacks.
-				if raw_packet_length < self.MAX_PACKET_SIZE:
+				if len(raw_packet) < self.MAX_PACKET_SIZE:
 					raise Neutrino.NetworkError.InvalidPacket('Client\'s hello packet too small, expected {0} bytes.'.format(self.MAX_PACKET_SIZE))
 			
 				# Packet has exactly 1 word; extract client's public key
 				try:
 					(client_public_key,) = self._expect_n_words(payload_words, 1)
 				except Neutrino.UnexpectedAmountOfWords:
-					raise Neutrino.NetworkError.InvalidPacket('Invalid client hello packet.')
+					raise Neutrino.NetworkError.InvalidPacket('Invalid CLIENT_HELLO packet.')
 				else:
 					# Validate client's public key
 					if len(client_public_key) is not self.PUBLIC_KEY_LENGTH:
 						raise Neutrino.RemoteCryptoError.InvalidPublicKey('Length of client\'s public key is expected to be exactly {0} bytes.'.format(self.PUBLIC_KEY_LENGTH))		
 					
-					# Derive and store per-connection read and write encryption keys
-					(self.client_sessions[client_id]['read_key'], self.client_sessions[client_id]['write_key']) = self._derive_server_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, client_public_key)
-					
-					# Generate random session id and change session state
-					self.client_sessions[client_id]['session_id'] = session_id = self._generate_random_client_session_id()
-					self.client_sessions[client_id]['session_state'] = self.INTERNAL_SESSION_STATE_ESTABLISHED
-					
-					# Generate random initial packet number
-					self.client_sessions[client_id]['packet_number'] = initial_packet_number = self._generate_initial_random_packet_number()
-					
-					# Add session id to client session ids list (session_id => client_id)
-					self.client_session_ids[session_id] = client_id					
-					
-					# Confirm session establishment to client
-					self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_SERVER_HELLO, session_id=session_id)
-					
 					# Trigger event
-					self.event_on_new_client_connected(client_id, session_id)
+					if self.event_on_new_client_connected(client_id, session_id) is True:
+						# Derive and store per-connection read and write encryption keys
+						(self.client_sessions[client_id]['read_key'], self.client_sessions[client_id]['write_key']) = self._derive_server_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, client_public_key)
+						
+						# Generate random session id and change session state
+						self.client_sessions[client_id]['session_id'] = session_id = self._generate_random_client_session_id()
+						self.client_sessions[client_id]['session_state'] = self.INTERNAL_SESSION_STATE_ESTABLISHED
+						
+						# Generate random initial packet number
+						self.client_sessions[client_id]['packet_number'] = initial_packet_number = self._generate_initial_random_packet_number()
+						
+						# Add session id to client session ids list (session_id => client_id)
+						self.client_session_ids[session_id] = client_id					
+						
+						# Confirm session establishment to client
+						self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_SERVER_HELLO, session_id=session_id)
 		
 		# Connected clients
 		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
@@ -1153,7 +1159,21 @@ class Neutrino:
 			# Close connection
 			elif packet_type is self.PACKET_TYPE_CLOSE:
 				self._unregister_client(self.CLIENT_UNREGISTER_REASON_CLOSE, client_id)
-		
+	
+	"""
+	SERVER / CLIENTS
+	"""
+	# Register packet from server or client
+	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+		# Trigger events (they can block the internal <_register_*> events)
+		if self.event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+			if self.is_server() is True:
+				if self.event_on_register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+					self._register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+			elif self.is_client() is True:
+				if self.event_on_register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+					self._register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+	
 	"""
 	OTHER
 	"""
@@ -1193,7 +1213,6 @@ class Neutrino:
 	# Default representation of integers (used for logging purposes)
 	def _get_int_repr(self, number: int) -> str:
 		return hex(number)
-		
 	
 	"""
 	DEBUG (Used for debugging purposes)
@@ -1201,7 +1220,6 @@ class Neutrino:
 	# Get packet type name (e.g. string "CLIENT_HELLO" for PACKET_TYPE_CLIENT_HELLO)
 	def get_packet_name_by_type(self, packet_type: int) -> str:
 		return self.PACKET_TYPE_NAMES[packet_type]
-	
 	
 	"""
 	EVENTS
@@ -1214,24 +1232,34 @@ class Neutrino:
 		>      pass
 	"""
 	# On every requested frame
-	def event_on_requested_frame(self) -> None:
-		return
+	def event_on_requested_frame(self, frame_number: int) -> bool:
+		return True
 		
 	# Received any unencrypted packet
-	def event_on_any_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
 		return
 		
 	# Sent any packet (encrypted or unprotected)
-	def event_on_packet_sent(self, client_id: Optional[int], remote_addr_pair: Optional[tuple], raw_packet: bytes, byte_words: list, packet_type: int, packet_number: int, session_id: int) -> None:
+	def event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, byte_words: list, packet_type: int, packet_number: int) -> None:
 		return
 		
 	# Packet was dropped
 	def event_on_packet_dropped(self, error_message: str) -> None:
 		return
+	
+	# Packets to be processed after they have been received
+	def event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+		return True
+		
+	def event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+		return True
+		
+	def event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, payload_words: tuple) -> bool:
+		return True
 		
 	# Session for a new client established
-	def event_on_new_client_connected(self, client_id: int, session_id: int) -> None:
-		return
+	def event_on_new_client_connected(self, client_id: int, session_id: int) -> bool:
+		return True
 	
 	# Client tries to connect to the server
 	def event_on_connecting_to_server(self) -> None:
@@ -1250,7 +1278,7 @@ class Neutrino:
 		return
 	
 	"""
-	Exceptions
+	EXCEPTIONS
 	"""
 	class LogicError(Exception):
 		__module__ = Exception.__module__
