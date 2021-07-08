@@ -134,29 +134,29 @@ class Neutrino:
 	CLIENT_SESSION_ID_NONE: int = 0x01
 	CLIENT_SESSION_ID_PENDING: int = 0x02	
 	
-	# Time in seconds after a session is destroyed when there are no packets received
-	SESSION_TIMEOUT_PENDING: float = 0.25
-	SESSION_TIMEOUT_ESTABLISHED: float = 1.0
+	# Time in milliseconds after a session is destroyed when there are no packets received
+	SESSION_TIMEOUT_PENDING: int = 250
+	SESSION_TIMEOUT_ESTABLISHED: int = 1500
 	
 	# (Must be lower than SESSION_TIMEOUT_ESTABLISHED and greater than SESSION_TIMEOUT_PENDING)
 	#
-	# Time in seconds after a KEEP_ALIVE packet is sent if there is no communication between
+	# Time in milliseconds after a KEEP_ALIVE packet is sent if there is no communication between
 	# the endpoints observed. This functionality is mandatory for the loss detection used
 	# in NeutrinoExtended, so do not increase this value without a good reason.
-	KEEP_ALIVE_PACKET_TIMEOUT: float = 0.5
+	KEEP_ALIVE_PACKET_TIMEOUT: int = 500
 	
 	# Max client id size
 	MAX_LOCAL_CLIENT_ID_SIZE: int = 2**64-1
 	
-	# Reconnect timeout after the session expired
+	# Reconnect timeout (milliseconds) after the session expired
 	#
 	# NOTE: Do not lower this too much, otherwise the server
 	# may receive a CLIENT_HELLO and drop it, because the server
 	# did not yet remove the client and assumes it is still connected.
-	CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED: float = 1.0
+	CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED: int = 1000
 	
-	# Reconnect timeout if the previous reconnect attempt was not successful
-	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: float = 3.0
+	# Reconnect timeout (milliseconds) if the previous reconnect attempt was not successful
+	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: int = 3000
 	
 	# Used for the <on_client_unregistered> event
 	CLIENT_UNREGISTER_REASON_CLOSE: int = 0x01
@@ -203,14 +203,16 @@ class Neutrino:
 	# Connection session id, packet number, ...
 	client_session_id: int = None
 	client_packet_number: int = None
-	client_local_session_expire_time: float = 0.0
 	
-	# Time of the very last packet we sent; used to prevent
-	# unnecessarily KEEP_ALIVE packets.
-	client_last_packet_sent_time: float = 0.0
+	# Precalculated session expire time in milliseconds
+	client_local_session_expire_time: int = 0
 	
-	# Calculated time after client tries to reconnect to the server
-	client_reattempt_connection_time: float = 0.0
+	# Time in milliseconds of the very last packet we sent;
+	# used to prevent unnecessarily KEEP_ALIVE packets.
+	client_last_packet_sent_time: int = 0
+	
+	# Calculated time (milliseconds) after client tries to reconnect to the server
+	client_reattempt_connection_time: int = 0
 	
 	# Used by the client to interact with encrypted packets
 	client_read_key: bytes = None
@@ -226,10 +228,10 @@ class Neutrino:
 	"""
 	VARIABLES/CONSTANTS: TICKERS
 	"""
-	SERVERS_TICK_TIME: float = 0.2
-	CLIENTS_TICK_TIME: float = 0.2
+	SERVERS_TICK_TIME: int = 100 # ms
+	CLIENTS_TICK_TIME: int = 25 # ms
 	
-	last_tick_time: float = 0.0
+	last_tick_time: int = 0
 	
 	"""
 	VARIABLES: STATISTICS
@@ -287,7 +289,7 @@ class Neutrino:
 	# Handles all incoming packets forever
 	def request_frame(self) -> int:
 		self.frame_number += 1
-			
+		
 		"""
 		>>WRITE -> Does happen immediately, see self._write()
 		"""
@@ -295,27 +297,27 @@ class Neutrino:
 		"""
 		<<READ
 		"""
-		for (key, mask) in self.selector.select(timeout=0.1):
-				# Receive next UDP packet
+		for (key, mask) in self.selector.select(timeout=(25 / 1000)):
+			# Receive next UDP packet
+			try:
 				try:
-					try:
-						client_id = None
-						
-						# Packet from any client
-						if self.is_server() is True:
-							(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
-						# Packet from the server
-						elif self.is_client() is True:
-							(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
+					client_id = None
 					
-						self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
-					# Drop unexpected packets
-					except Neutrino.NetworkError.UnexpectedPacket as message:
-						raise Neutrino.Instruction.DropThisPacket(message)
+					# Packet from any client
+					if self.is_server() is True:
+						(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
+					# Packet from the server
+					elif self.is_client() is True:
+						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
 				
-				# Silently drop and trigger event
-				except Neutrino.Instruction.DropThisPacket as message:
-					self.event_on_packet_dropped(message)
+					self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+				# Drop unexpected packets
+				except Neutrino.NetworkError.UnexpectedPacket as message:
+					raise Neutrino.Instruction.DropThisPacket(message)
+			
+			# Silently drop and trigger event
+			except Neutrino.Instruction.DropThisPacket as message:
+				self.event_on_packet_dropped(message)
 		
 		"""
 		::TICKERS
@@ -330,21 +332,21 @@ class Neutrino:
 		
 		return self.frame_number
 
-	# Default: Five times per second
+	# Default: Each 100 ms
 	def _servers_tick(self):
-		if self.last_tick_time + self.SERVERS_TICK_TIME < time.time():
-			self.last_tick_time = time.time()
+		if self.last_tick_time + self.SERVERS_TICK_TIME < self._time_milliseconds():
+			self.last_tick_time = self._time_milliseconds()
 			
 			# Remove all timed out client connections
 			self._check_for_timed_out_clients()
 	
-	# Default: Five times per second
+	# Default: Each 25 ms
 	def _clients_tick(self):
-		if self.last_tick_time + self.CLIENTS_TICK_TIME < time.time():
-			self.last_tick_time = time.time()
+		if self.last_tick_time + self.CLIENTS_TICK_TIME < self._time_milliseconds():
+			self.last_tick_time = self._time_milliseconds()
 			
 			# Invalidate session once expired
-			if self.client_local_session_expire_time > 0 and self.client_local_session_expire_time < time.time():
+			if self.client_local_session_expire_time > 0 and self.client_local_session_expire_time < self._time_milliseconds():
 				self.client_session_id = None
 				self.client_packet_number = None
 				
@@ -354,21 +356,21 @@ class Neutrino:
 					self.client_local_session_expire_time = 0.0
 					
 					# Set timeout for re-establishing connection to the server
-					self.client_reattempt_connection_time = (time.time() + self.CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED)
+					self.client_reattempt_connection_time = (self._time_milliseconds() + self.CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED)
 				# Failed to establish connection at all
 				else:
 					pass
 			
 			# Establish encrypted session to the server
 			if self.connected_to_server() is False:
-				if self.client_reattempt_connection_time < time.time():
+				if self.client_reattempt_connection_time < self._time_milliseconds():
 					self.connect_to_server()
 					
 					# Set timeout for next retry
-					self.client_reattempt_connection_time = (time.time() + self.CLIENT_CONNECTION_TIMEOUT_REATTEMPT)
+					self.client_reattempt_connection_time = (self._time_milliseconds() + self.CLIENT_CONNECTION_TIMEOUT_REATTEMPT)
 			else:
 				# Periodically send KEEP_ALIVE packets to validate the connection
-				if self.client_last_packet_sent_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < time.time():
+				if self.client_last_packet_sent_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._time_milliseconds():
 					self._send_keep_alive_packet(None, None)
 	
 	"""
@@ -774,7 +776,7 @@ class Neutrino:
 		
 		# Sent time of the very last packet
 		if self.is_client() is True:
-			self.client_last_packet_sent_time = time.time()
+			self.client_last_packet_sent_time = self._time_milliseconds()
 		
 		return bytes_sent
 	
@@ -864,7 +866,7 @@ class Neutrino:
 	def _check_for_timed_out_clients(self):
 		for client_id in list(self.client_sessions):
 			# Session is expired
-			if self.client_sessions[client_id]['local_session_expire_time'] < time.time():
+			if self.client_sessions[client_id]['local_session_expire_time'] < self._time_milliseconds():
 				(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
 	
 	# Adds a new client
@@ -879,7 +881,7 @@ class Neutrino:
 			# Session
 			'session_id': None,
 			'session_state': self.INTERNAL_SESSION_STATE_NONE,
-			'local_session_expire_time': (time.time() + self.SESSION_TIMEOUT_PENDING),
+			'local_session_expire_time': (self._time_milliseconds() + self.SESSION_TIMEOUT_PENDING),
 			
 			# Cryptographic read and write keys derived from the clients
 			# public key. These keys change for every connection.
@@ -1101,7 +1103,7 @@ class Neutrino:
 			session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
 		
 		# Precalculate time when the session ends
-		self.client_local_session_expire_time = (time.time() + session_timeout)	
+		self.client_local_session_expire_time = (self._time_milliseconds() + session_timeout)	
 	
 	"""
 	SERVER
@@ -1134,9 +1136,9 @@ class Neutrino:
 				
 					# Packet has exactly 1 word; extract client's public key
 					try:
-						(client_public_key,) = self._expect_n_words(payload_words, 1)
+						(client_public_key,) = self._expect_n_words(payload_words, exactly=1)
 					except Neutrino.UnexpectedAmountOfWords:
-						raise Neutrino.NetworkError.InvalidPacket('Invalid CLIENT_HELLO packet.')
+						raise Neutrino.NetworkError.InvalidPacket('Malformed PACKET_TYPE_CLIENT_HELLO1: Expected exactly one (1) word in payload.') from None
 					else:
 						# Validate client's public key
 						if len(client_public_key) is not self.PUBLIC_KEY_LENGTH:
@@ -1195,7 +1197,7 @@ class Neutrino:
 			if self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
 				session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
 			
-			self.client_sessions[client_id]['local_session_expire_time'] = (time.time() + session_timeout)
+			self.client_sessions[client_id]['local_session_expire_time'] = (self._time_milliseconds() + session_timeout)
 	
 	"""
 	SERVER / CLIENTS
@@ -1234,8 +1236,8 @@ class Neutrino:
 		
 	# Just throws an exception if amount of words is
 	# not equal to the expected
-	def _expect_n_words(self, words: list, expected_amount: int) -> list:
-		if len(words) is not expected_amount:
+	def _expect_n_words(self, words: list, exactly: int) -> list:
+		if len(words) is not exactly:
 			raise Neutrino.UnexpectedAmountOfWords
 			
 		return words
@@ -1256,6 +1258,10 @@ class Neutrino:
 	# Default representation of integers (used for logging purposes)
 	def _get_int_repr(self, number: int) -> str:
 		return hex(number)
+		
+	# Get current milliseconds timestamp
+	def _time_milliseconds(self) -> int:
+		return int(str(time.time_ns())[:-6])
 	
 	"""
 	DEBUG (Used for debugging purposes)
