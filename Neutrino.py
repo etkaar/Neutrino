@@ -47,7 +47,7 @@ from typing import Optional
 
 """
 The basic Neutrino class to be inherited from
-(also referred to as Neutrino Simple)
+(also referred to as Neutrino Simple).
 """
 class Neutrino:
 	"""
@@ -317,7 +317,7 @@ class Neutrino:
 			
 			# Silently drop and trigger event
 			except Neutrino.Instruction.DropThisPacket as message:
-				self.event_on_packet_dropped(message)
+				self.base_event_on_packet_dropped(message)
 		
 		"""
 		::TICKERS
@@ -328,7 +328,7 @@ class Neutrino:
 			self._clients_tick()
 			
 		# Trigger event
-		self.event_on_requested_frame(self.frame_number)
+		self.base_event_on_requested_frame(self.frame_number)
 		
 		return self.frame_number
 
@@ -724,7 +724,7 @@ class Neutrino:
 			client_id = self._register_client(client_ip, client_port)
 		
 		# Trigger event
-		self.event_on_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)
+		self.base_event_on_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)
 		
 		return (client_id, session_id, (client_ip, client_port), raw_packet, packet_type, packet_number, payload_words)
 		
@@ -744,7 +744,7 @@ class Neutrino:
 		payload_words = self._decode_and_validate_decrypted_packet_payload(raw_packet)
 		
 		# Trigger event
-		self.event_on_packet_received(None, session_id, remote_addr_pair, packet_type, packet_number, payload_words)
+		self.base_event_on_packet_received(None, session_id, remote_addr_pair, packet_type, packet_number, payload_words)
 		
 		return (session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
 		
@@ -815,7 +815,7 @@ class Neutrino:
 		self._write(remote_addr_pair, raw_packet)
 	
 		# Trigger event
-		self.event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number)
+		self.base_event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number)
 		
 		# Return packet number
 		return (raw_packet, packet_number)
@@ -853,7 +853,7 @@ class Neutrino:
 		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=[self.get_local_public_key()], padding=-1)
 		
 		# Trigger event
-		self.event_on_connecting_to_server()
+		self.base_event_on_connecting_to_server()
 		
 	# Close connection to the server
 	def close_connection_to_server(self):
@@ -911,7 +911,7 @@ class Neutrino:
 			del self.client_client_ids[client_ip]
 			
 		# Trigger event
-		self.event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
+		self.base_event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
 		
 		return (client_ip, client_port, session_id)
 	
@@ -994,7 +994,7 @@ class Neutrino:
 			self.client_client_ids[new_client_ip][new_client_port] = client_id
 			
 			# Trigger event
-			self.event_on_client_addr_change(client_id, old_client_ip, old_client_port, new_client_ip, new_client_port)
+			self.base_event_on_client_addr_change(client_id, old_client_ip, old_client_port, new_client_ip, new_client_port)
 	
 	# Get (and possibly increment) the servers packet number for a specific client session
 	def _get_servers_client_session_packet_number(self, client_id: int, increment: bool=False):
@@ -1093,7 +1093,7 @@ class Neutrino:
 				self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO3, session_id=self.client_session_id)
 				
 				# Trigger event
-				self.event_on_has_connected_to_server(self.client_session_id)
+				self.base_event_on_has_connected_to_server(self.client_session_id)
 	
 		# Update precalculated time when the session ends
 		session_timeout = self.SESSION_TIMEOUT_PENDING
@@ -1145,7 +1145,7 @@ class Neutrino:
 							raise Neutrino.RemoteCryptoError.InvalidPublicKey('Length of client\'s public key is expected to be exactly {0} bytes.'.format(self.PUBLIC_KEY_LENGTH))		
 						
 						# Trigger event
-						if self.event_on_new_client_connected(client_id, session_id) is True:
+						if self.base_event_on_new_client_connected(client_id, session_id) is True:
 							# Derive and store per-connection read and write encryption keys
 							(self.client_sessions[client_id]['read_key'], self.client_sessions[client_id]['write_key']) = self._derive_server_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, client_public_key)
 							
@@ -1211,12 +1211,12 @@ class Neutrino:
 	# Register packet from server or client
 	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
 		# Trigger events (they can block the internal <_register_*> events)
-		if self.event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+		if self.base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
 			if self.is_server() is True:
-				if self.event_on_register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+				if self.base_event_on_register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
 					self._register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
 			elif self.is_client() is True:
-				if self.event_on_register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+				if self.base_event_on_register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
 					self._register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
 	
 	"""
@@ -1277,53 +1277,53 @@ class Neutrino:
 	
 		> from Neutrino import Neutrino as NeutrinoSimple
 		> class Neutrino(NeutrinoSimple):
-		>   def event_*():
+		>   def event_*() -> ?:
 		>      pass
 	"""
 	# On every requested frame (after successfull reading or read timeout)
-	def event_on_requested_frame(self, frame_number: int) -> None:
+	def base_event_on_requested_frame(self, frame_number: int) -> None:
 		return
 		
 	# Received any unencrypted packet
-	def event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
 		return
 		
 	# Sent any packet (encrypted or unprotected)
-	def event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, byte_words: list, packet_type: int, packet_number: int) -> None:
+	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, byte_words: list, packet_type: int, packet_number: int) -> None:
 		return
 		
 	# Packet was dropped
-	def event_on_packet_dropped(self, error_message: str) -> None:
+	def base_event_on_packet_dropped(self, error_message: str) -> None:
 		return
 	
 	# Packets to be processed after they have been received
-	def event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
 		return True
 		
-	def event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
 		return True
 		
-	def event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, payload_words: tuple) -> bool:
 		return True
 		
 	# Session for a new client established
-	def event_on_new_client_connected(self, client_id: int, session_id: int) -> bool:
+	def base_event_on_new_client_connected(self, client_id: int, session_id: int) -> bool:
 		return True
 	
 	# Client tries to connect to the server
-	def event_on_connecting_to_server(self) -> None:
+	def base_event_on_connecting_to_server(self) -> None:
 		return
 	
 	# Session to server from client established
-	def event_on_has_connected_to_server(self, session_id: int) -> None:
+	def base_event_on_has_connected_to_server(self, session_id: int) -> None:
 		return
 		
 	# Client unregistered (due to CLOSE or TIMEOUT)
-	def event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
+	def base_event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
 		return
 		
 	# Client's host and/or port changed during session lifetime
-	def event_on_client_addr_change(self, client_id: int, old_client_ip: str, old_client_port: int, new_client_ip: str, new_client_port: int) -> None:
+	def base_event_on_client_addr_change(self, client_id: int, old_client_ip: str, old_client_port: int, new_client_ip: str, new_client_port: int) -> None:
 		return
 	
 	"""
