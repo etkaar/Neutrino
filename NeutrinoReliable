@@ -417,8 +417,8 @@ class NeutrinoReliable(Neutrino):
 	# in order to allow the other endpoint to clear its outgoing buffer.
 	#
 	# PAYLOAD
-	# 	1) Timestamp in milliseconds of the time this KEEP_ALIVE packet is sent
-	# 	2) Latest confirmed packet number for this endpoint
+	#  1) Timestamp in milliseconds of the time this KEEP_ALIVE packet is sent
+	#  2) Latest confirmed packet number for this endpoint
 	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], byte_words: list=[]) -> None:
 		# The actual client id or None for the server (converted to -1)
 		endpoint_id = client_id or -1
