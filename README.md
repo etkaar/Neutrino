@@ -1,3 +1,5 @@
+**WARNING: This software is currently under development and not to be used in production yet.**
+
 # Neutrino
 Secure and event-driven low-level UDP protocol with focus on simplicity and high performance.
 
