@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–22 etkaar <https://github.com/etkaar>
+Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
