@@ -33,7 +33,7 @@ ENCRYPTED(
   - Type hints for class variables, but none for function variables.
   - Type hints for function arguments and return values.
 	  
-# Requirements: Python
+# Requirements
 - Python
   - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
