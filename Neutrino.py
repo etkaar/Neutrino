@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021 etkaar <https://github.com/etkaar>
+Copyright (c) 2021–22 etkaar <https://github.com/etkaar>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -56,7 +56,7 @@ class Neutrino:
 	# Little-endian
 	BYTE_ORDER: str = '<'
 	
-	# Arbitrary but unique protocol identifier
+	# Arbitrary but unique 32-bit protocol identifier
 	PROTOCOL_IDENTIFIER: int = 0x5baa260c
 	
 	# Protocol version number which may be iterated only after relevent updates
@@ -65,15 +65,30 @@ class Neutrino:
 	# Header has a left and right part, because the left part must be left unprotected.
 	#
 	# LEFT : <[Protocol Identifier = u32 bit (4)] [Protocol Version = u8 bit (1)] [Type = u8 bit (1)] [Session ID = u64 bit (8)]>
-	# RIGHT: <[Packet Number = u64 bit (8)]>
+	# RIGHT: <[Packet Number = u64 bit (8)]> <[Keyword: Reserved for arbitrary use = u32 bit (4)]>
 	HEADER_FORMAT_LEFT: str = 'IBBQ'
-	HEADER_FORMAT_RIGHT: str = 'Q'
+	HEADER_FORMAT_RIGHT: str = 'QI'
 	
-	# Sizes (total header size is 22 bytes)
+	# Sizes (total header size is 26 bytes)
 	HEADER_SIZE_LEFT: int = 4 + 1 + 1 + 8
-	HEADER_SIZE_RIGHT: int = 8
+	HEADER_SIZE_RIGHT: int = 8 + 4
 	
 	TOTAL_HEADER_SIZE: int = (HEADER_SIZE_LEFT + HEADER_SIZE_RIGHT)
+	
+	# Maximum amount of words in payload and maximum word size
+	#
+	# NOTE: This is defined in bytes.
+	#
+	# For Neutrino Simple this is not really relevant, because it is
+	# way more likely to exceed the MAX_PAYLOAD_SIZE.
+	MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES: int = 1 # 1 byte = 2**8-1 = 0–255
+	MAX_PAYLOAD_WORD_SIZE_IN_BYTES: int = 2 # 2 bytes = 2**16-1 = 0–65535
+	
+	MAX_AMOUNT_OF_PAYLOAD_WORDS: int = (2**(8*MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES) - 1)
+	MAX_PAYLOAD_WORD_SIZE: int = (2**(8*MAX_PAYLOAD_WORD_SIZE_IN_BYTES) - 1)
+	
+	FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS: str = 'B' # Unsigned char (1 byte)
+	FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE: str = 'H' # Unsigned short (2 bytes)
 	
 	# All packages, except the PACKET_TYPE_CLIENT_HELLO1, are encrypted
 	PACKET_TYPE_CLIENT_HELLO1: int = 0x01
@@ -89,6 +104,9 @@ class Neutrino:
 	# UDP packet size; see the QUIC protocol for more information.
 	MAX_PACKET_SIZE: int = 1280
 	
+	# Use that in case you want to force a minimum packet size (realized by padding)
+	MIN_PACKET_SIZE: int = 0
+	
 	# Encryption invokes a small overhead (24 bytes for the nonce, 16 bytes for the encryption header). We need to take care of that once we check the limits.
 	PACKET_ENCRYPTION_OVERHEAD: int = (nacl.bindings.crypto_aead.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES + nacl.bindings.crypto_aead.crypto_aead_xchacha20poly1305_ietf_ABYTES)
 	
@@ -98,16 +116,24 @@ class Neutrino:
 	# Padding char
 	PACKET_PADDING_CHAR: bytes = b'\x00'
 	
-	# Max size of sequence number in bit. If you need
-	# to change that, you also need to alter HEADER.
+	# Max size of sequence number. If you need to change
+	# that, you also need to alter HEADER.
 	MAX_PACKET_NUMBER_SIZE: int = 2**64-1
 	
 	INITIAL_PACKET_NUMBER_RANGE_MIN: int = 2**6 # 64
-	INITIAL_PACKET_NUMBER_RANGE_MAX: int = 2**31-1
+	INITIAL_PACKET_NUMBER_RANGE_MAX: int = 2**31-1	
 	
 	# Packet numbers
 	PACKET_NUMBER_NONE: int = 0x01
 	PACKET_NUMBER_PENDING: int = 0x02
+	
+	# Max keyword size. If you need to change
+	# that, you also need to alter HEADER.
+	MAX_PACKET_KEYWORD_SIZE: int = 2**32-1	
+	
+	# We do not use keywords, as this is functionality
+	# is reserved for extended classes
+	PACKET_KEYWORD_NONE: int = 0x00
 	
 	# Length of public and secret key in bytes
 	PUBLIC_KEY_LENGTH: int = nacl.bindings.crypto_kx.crypto_kx_PUBLIC_KEY_BYTES
@@ -298,19 +324,23 @@ class Neutrino:
 		<<READ
 		"""
 		for (key, mask) in self.selector.select(timeout=(25 / 1000)):
-			# Receive next UDP packet
+			"""
+			Receive next UDP packet: At this stage, packets are decrypted, but not fully decoded.
+			"""
 			try:
 				try:
 					client_id = None
 					
 					# Packet from any client
 					if self.is_server() is True:
-						(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_any_client()
+						(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_any_client()
 					# Packet from the server
 					elif self.is_client() is True:
-						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) = self._get_next_packet_from_the_server()
+						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_the_server()
 				
-					self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+					# Trigger event
+					self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
+					
 				# Drop unexpected packets
 				except Neutrino.NetworkError.UnexpectedPacket as message:
 					raise Neutrino.Instruction.DropThisPacket(message)
@@ -509,6 +539,35 @@ class Neutrino:
 	def _int64_from_bytes(self, number) -> int:
 		return struct.unpack(self.BYTE_ORDER + 'Q', number)[0]
 		
+	# Convert words into payload
+	def _byte_words_to_payload(self, payload_words: list=[]) -> bytes:
+		if type(payload_words) is not list:
+			raise Neutrino.EncodingError("'payload_words' must be a list, containing items of type 'bytes'.")
+		
+		# Maximum amount of words must not be exceeded
+		amount_of_byte_words = len(payload_words)
+		
+		if amount_of_byte_words > self.MAX_AMOUNT_OF_PAYLOAD_WORDS:
+			raise Neutrino.EncodingError('Payload must not contain more than {0} words (got {1}).'.format(self.MAX_AMOUNT_OF_PAYLOAD_WORDS, amount_of_byte_words))
+		
+		# Start with the number of words
+		raw_payload_bytes = self._pack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, amount_of_byte_words)
+		
+		for byte_word in payload_words:
+			if type(byte_word) is not bytes:
+				raise Neutrino.EncodingError("Item in list 'payload_words' must be of type 'bytes': {0}".format(byte_word))
+			
+			# Maximum word length must not be exceeded
+			word_size = len(byte_word)
+			
+			if word_size > self.MAX_PAYLOAD_WORD_SIZE:
+				raise Neutrino.EncodingError('Size of this word ({0} bytes) would exceed maximum word size of {1} bytes.'.format(word_size, self.MAX_PAYLOAD_WORD_SIZE))
+				
+			raw_payload_bytes += self._pack(self.FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE, word_size)
+			raw_payload_bytes += byte_word
+			
+		return raw_payload_bytes
+		
 	# Encrypt encoded package (= encode and then encrypt)
 	def _encrypt_encoded_packet(self, raw_key: bytes, raw_packet: bytes) -> bytes:
 		# Header is partially encrypted and payload is fully encrypted
@@ -523,31 +582,25 @@ class Neutrino:
 		return raw_packet_encrypted
 	
 	# Encode packet from raw bytes words (this does not take care of UTF-8 encodes strings)
-	def _encode_packet(self, packet_type: int, packet_number: int, session_id: int, byte_words: list=[], padding: int=0):
+	def _encode_packet(self, packet_type: int, packet_number: int, packet_keyword: int, session_id: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> bytes:
 		if type(packet_type) is not int:
 			raise Neutrino.EncodingError("'packet_type' must be type of 'int', but given: {0}".format(packet_type))
 			
 		if type(packet_number) is not int:
 			raise Neutrino.EncodingError("'packet_number' must be type of 'int', but given: {0}".format(packet_number))
 			
+		if type(packet_keyword) is not int:
+			raise Neutrino.EncodingError("'packet_keyword' must be type of 'int', but given: {0}".format(packet_keyword))
+			
 		if type(session_id) is not int:
 			raise Neutrino.EncodingError("'session_id' must be type of 'int', but given: {0}".format(session_id))
 			
-		if type(byte_words) is not list:
-			raise Neutrino.EncodingError("'byte_words' must be a list, containing items of type 'bytes'.")
+		# Convert byte words list into payload
+		if raw_payload_bytes is None:
+			raw_payload_bytes = self._byte_words_to_payload(payload_words)
 		
-		# Start with the number of words
-		payload_bytes = self._pack('B', len(byte_words))
-		
-		for byte_word in byte_words:
-			if type(byte_word) is not bytes:
-				raise Neutrino.EncodingError("Item in list 'byte_words' must be of type 'bytes': {0}".format(byte_word))
-			
-			payload_bytes += self._pack('H', len(byte_word))
-			payload_bytes += byte_word
-			
 		# Ensure that max payload size (and thus max packet size) is not exceeded
-		payload_size = len(payload_bytes)
+		payload_size = len(raw_payload_bytes)
 		
 		if payload_size > self.MAX_PAYLOAD_SIZE:
 			raise Neutrino.EncodingError('Payload size of this packet ({0} bytes) would exceed maximum size of {1} bytes.'.format(payload_size, self.MAX_PAYLOAD_SIZE))
@@ -555,14 +608,17 @@ class Neutrino:
 		# Create header
 		raw_packet = b''
 		raw_packet += self._pack(self.HEADER_FORMAT_LEFT, self.PROTOCOL_IDENTIFIER, self.PROTOCOL_VERSION, packet_type, session_id)
-		raw_packet += self._pack(self.HEADER_FORMAT_RIGHT, packet_number)
+		raw_packet += self._pack(self.HEADER_FORMAT_RIGHT, packet_number, packet_keyword)
 		
 		# Just append bytes payload to the header instead of packing it
-		raw_packet += payload_bytes
+		raw_packet += raw_payload_bytes
 		
-		# Pad out packet until max size is reached
-		if padding is -1:
-			raw_packet += (self.MAX_PACKET_SIZE - len(raw_packet)) * self.PACKET_PADDING_CHAR
+		# Pad out packet until max size (padding) is reached
+		if padding is 0:
+			padding = self.MIN_PACKET_SIZE
+			
+		if padding > len(raw_packet):
+			raw_packet += (padding - len(raw_packet)) * self.PACKET_PADDING_CHAR
 		
 		return raw_packet
 		
@@ -607,15 +663,25 @@ class Neutrino:
 			raise Neutrino.NetworkError.InvalidPacket('Invalid session id.')
 			
 		return (packet_type, session_id)
+	
+	# Combined call of self._decode_and_validate_decrypted_packet_[header|payload]()
+	def _decode_and_validate_decrypted_packet_header_and_payload(self, raw_packet: bytes) -> tuple:
+		# Packet number and keyword
+		(packet_number, packet_keyword) = self._decode_and_validate_decrypted_packet_header(raw_packet)
 		
+		# Payload
+		payload_words = self._decode_and_validate_decrypted_packet_payload(raw_packet)
+		
+		return (packet_number, packet_keyword, payload_words)
+	
 	# Decode the (usually previously) decrypted right part of the packet header
 	def _decode_and_validate_decrypted_packet_header(self, raw_packet: bytes) -> tuple:
 		try:
-			(packet_number,) = self._unpack(self.HEADER_FORMAT_RIGHT, raw_packet[self.HEADER_SIZE_LEFT:(self.HEADER_SIZE_LEFT + self.HEADER_SIZE_RIGHT)])
+			(packet_number, packet_keyword) = self._unpack(self.HEADER_FORMAT_RIGHT, raw_packet[self.HEADER_SIZE_LEFT:(self.HEADER_SIZE_LEFT + self.HEADER_SIZE_RIGHT)])
 		except struct.error as message:
 			raise Neutrino.NetworkError.InvalidPacket(('Malformed header (decrypted part).', message)) from None
 			
-		return (packet_number,)
+		return (packet_number, packet_keyword)
 		
 	# Decode the (usually previously) decrypted payload of the packet
 	def _decode_and_validate_decrypted_packet_payload(self, raw_packet: bytes) -> tuple:
@@ -628,37 +694,45 @@ class Neutrino:
 		if payload_bytes_size == 0:
 			raise Neutrino.NetworkError.InvalidPacket('Empty payload given.')
 		
-		# Get amount of words (u8 bit = 1 byte)
-		(amount_of_byte_words,) = self._unpack('B', payload_bytes[0:1])
+		# Get and validate amount of payload words 
+		(amount_of_byte_words,) = self._unpack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, payload_bytes[0:self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES])
 		
-		# Place offset after [Number of Words = u8 bit (1)]
-		offset = 1
+		if amount_of_byte_words < 0:
+			raise Neutrino.NetworkError.InvalidPacket("Malformed payload: 'amount_of_byte_words' rendered to an invalid value. Got {0}, but expected a value between 0 and {1}.".format(amount_of_byte_words, self.MAX_AMOUNT_OF_PAYLOAD_WORDS))
+		
+		# Place offset after the number of words byte(s)
+		offset = self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES
 		
 		# Extract all byte words
-		byte_words = []
+		payload_words = []
 		
 		for x in range(0, amount_of_byte_words):
 			try:
-				# Word length ([Word Length = u16 bit (2)])
-				(byte_word_length,) = self._unpack('H', payload_bytes[offset:(offset + 2)])
-				offset += 2
+				# Word size
+				(byte_word_length,) = self._unpack(self.FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE, payload_bytes[offset:(offset + self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES)])
+				offset += self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES
 				
-				# Byte word ([Word = ? bit])
-				byte_words.append(payload_bytes[offset:(offset + byte_word_length)])
+				if byte_word_length <= 0:
+					raise Neutrino.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(amount_of_byte_words, self.MAX_PAYLOAD_WORD_SIZE))
+				
+				# Byte word ([Word = ? bytes])
+				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
 				offset += byte_word_length
 			except struct.error as e:
-				raise Neutrino.NetworkError.InvalidPacket(('Malformed payload (total size: {0} bytes).'.format(payload_bytes_size), e)) from None
+				raise Neutrino.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word <{0}/{1}>, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
 		
-		# Remove any trailing padding chars
-		payload_bytes = payload_bytes.rstrip(self.PACKET_PADDING_CHAR)
+		"""
+		# The right side of the payload needs to be either empty *or* only consist of PACKET_PADDING_CHAR bytes,
+		# which, after stripping, also results the right side to be empty.
+		if len(payload_bytes[offset:].rstrip(self.PACKET_PADDING_CHAR)) != 0:
+			raise Neutrino.NetworkError.InvalidPacket('Unexpected payload size of {0} bytes.'.format(offset))
+		"""
+		unpadded_payload_bytes_size = len(payload_bytes.rstrip(self.PACKET_PADDING_CHAR))
 		
-		# Make sure that we unpacked the whole payload
-		payload_bytes_size = len(payload_bytes)
+		if offset < unpadded_payload_bytes_size:
+			raise Neutrino.NetworkError.InvalidPacket('Could not extract all words from payload. Payload may contain unexpected bytes (expected {0} bytes, but received {1}).'.format(offset, unpadded_payload_bytes_size))
 		
-		if offset < payload_bytes_size:
-			raise Neutrino.NetworkError.InvalidPacket('Could not extract all words from payload. Payload may contain unexpected bytes (total size: {0} bytes).'.format(payload_bytes_size))
-		
-		return byte_words
+		return payload_words
 	
 	"""
 	NETWORK: READ
@@ -710,11 +784,8 @@ class Neutrino:
 			# Update current host and port of the client
 			self._update_client_addr(client_id, client_ip, client_port)
 		
-		# Decode and validate the part of the decrypted protected header
-		(packet_number,) = self._decode_and_validate_decrypted_packet_header(raw_packet)	
-		
-		# Decode and validate decrypted package
-		payload_words = self._decode_and_validate_decrypted_packet_payload(raw_packet)
+		# Decode and validate the part of the decrypted protected header, then, decode and validate payload
+		(packet_number, packet_keyword, payload_words) = self._decode_and_validate_decrypted_packet_header_and_payload(raw_packet)
 		
 		# Get existing client
 		try:
@@ -724,9 +795,9 @@ class Neutrino:
 			client_id = self._register_client(client_ip, client_port)
 		
 		# Trigger event
-		self.base_event_on_packet_received(client_id, session_id, (client_ip, client_port), packet_type, packet_number, payload_words)
+		self.base_event_on_packet_received(client_id, session_id, (client_ip, client_port), raw_packet, packet_type, packet_number, packet_keyword, payload_words)		
 		
-		return (client_id, session_id, (client_ip, client_port), raw_packet, packet_type, packet_number, payload_words)
+		return (client_id, session_id, (client_ip, client_port), raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
 	# Clients read function
 	def _clients_read(self) -> tuple:
@@ -737,16 +808,13 @@ class Neutrino:
 			# Encrypted encoded package => Decrypted encoded package
 			raw_packet = self._decrypt_encoded_packet(raw_key=self.client_read_key, raw_packet=raw_packet)
 		
-		# Decode and validate the part of the decrypted protected header
-		(packet_number,) = self._decode_and_validate_decrypted_packet_header(raw_packet)	
-		
-		# Decode and validate decrypted package
-		payload_words = self._decode_and_validate_decrypted_packet_payload(raw_packet)
+		# Decode and validate the part of the decrypted protected header, then, decode and validate payload
+		(packet_number, packet_keyword, payload_words) = self._decode_and_validate_decrypted_packet_header_and_payload(raw_packet)
 		
 		# Trigger event
-		self.base_event_on_packet_received(None, session_id, remote_addr_pair, packet_type, packet_number, payload_words)
+		self.base_event_on_packet_received(None, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)	
 		
-		return (session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+		return (session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
 	# Receives the next packet from any client
 	def _get_next_packet_from_any_client(self) -> tuple:
@@ -781,7 +849,7 @@ class Neutrino:
 		return bytes_sent
 	
 	# Send packet to any endpoint
-	def _send_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, packet_keyword: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> tuple:
 		# Ensure client_id is given if endpoint is the server
 		if self.is_server() is True and client_id is None:
 			raise Neutrino.LogicError("'client_id' cannot be None if packet is sent to a client.")
@@ -791,11 +859,10 @@ class Neutrino:
 			remote_addr_pair = self._get_client_addr_by_client_id(client_id)
 			
 		# Create encoded packet
-		raw_packet = self._encode_packet(packet_type, packet_number, session_id, byte_words, padding)
+		raw_packet = self._encode_packet(packet_type, packet_number, packet_keyword, session_id, raw_payload_bytes, payload_words, padding)
 		
 		# As long it is not the initial client's HELLO packet
 		if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO1]:
-		
 			# Cannot encrypt packets if no valid session id is given
 			if session_id is self.CLIENT_SESSION_ID_PENDING:
 				raise Neutrino.LogicError("Cannot encrypt packet if no valid session id is given.")
@@ -815,21 +882,20 @@ class Neutrino:
 		self._write(remote_addr_pair, raw_packet)
 	
 		# Trigger event
-		self.base_event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, byte_words, packet_type, packet_number)
+		self.base_event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
-		# Return packet number
 		return (raw_packet, packet_number)
 		
 	# Send packet to a client
-	def _send_to_client(self, client_id: int, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_to_client(self, client_id: int, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
 		# Get current clients session package number and increment it afterwards
 		packet_number = self._get_servers_client_session_packet_number(client_id=client_id, increment=True)
 		
 		# Send packet to client
-		return self._send_packet(client_id, session_id, None, packet_type, packet_number, byte_words, padding)
+		return self._send_packet(client_id, session_id, None, packet_type, packet_number, self.PACKET_KEYWORD_NONE, None, payload_words, padding)
 
 	# Send packet to the server
-	def _send_to_server(self, packet_type: int, session_id: int, byte_words: list=[], padding: int=0) -> tuple:
+	def _send_to_server(self, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
 		packet_number = self.PACKET_NUMBER_PENDING
 		
 		# As long it is not the initial client's HELLO packet
@@ -838,7 +904,7 @@ class Neutrino:
 			packet_number = self._get_clients_packet_number(increment=True)
 		
 		# Send packet to server
-		return self._send_packet(None, session_id, (self.host, self.port), packet_type, packet_number, byte_words, padding)
+		return self._send_packet(None, session_id, (self.host, self.port), packet_type, packet_number, self.PACKET_KEYWORD_NONE, None, payload_words, padding)
 
 	"""
 	CLIENTS
@@ -850,7 +916,7 @@ class Neutrino:
 	
 		# Send HELLO packet to server to establish the encrypted connection.
 		# The initial HELLO packet must be padded out to prevent amplification attacks.
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.CLIENT_SESSION_ID_PENDING, byte_words=[self.get_local_public_key()], padding=-1)
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.CLIENT_SESSION_ID_PENDING, payload_words=[self.get_local_public_key()], padding=self.MAX_PACKET_SIZE)
 		
 		# Trigger event
 		self.base_event_on_connecting_to_server()
@@ -1071,7 +1137,7 @@ class Neutrino:
 		return False
 		
 	# Register packet from the server
-	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
 		# Client is connected to the server
 		if self.connected_to_server() is True:
 			# Ensure only packet types specific for established sessions are sent
@@ -1109,7 +1175,7 @@ class Neutrino:
 	SERVER
 	"""
 	# Register packet from any client
-	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
 		session_state = self.client_sessions[client_id]['session_state']
 
 		# Client tries to establish a new session by sending
@@ -1130,9 +1196,11 @@ class Neutrino:
 				# Client initializes connection by sending its public key
 				if packet_type is self.PACKET_TYPE_CLIENT_HELLO1:
 				
-					# Hello packets must be padded out to prevent amplification attacks.
-					if len(raw_packet) < self.MAX_PACKET_SIZE:
-						raise Neutrino.NetworkError.InvalidPacket('Client\'s hello packet too small, expected {0} bytes.'.format(self.MAX_PACKET_SIZE))
+					# Hello packets must be padded out to prevent amplification attacks
+					packet_size = len(raw_packet)
+					
+					if packet_size < self.MAX_PACKET_SIZE:
+						raise Neutrino.NetworkError.InvalidPacket('Client\'s hello packet size of {0} bytes is too small, expected {1} bytes.'.format(packet_size, self.MAX_PACKET_SIZE))
 				
 					# Packet has exactly 1 word; extract client's public key
 					try:
@@ -1202,22 +1270,22 @@ class Neutrino:
 	"""
 	SERVER / CLIENTS
 	"""
-	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], byte_words: list=[]) -> None:
+	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], payload_words: list=[]) -> None:
 		if self.is_client() is True:
-			self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, byte_words=byte_words)
+			self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
 		elif self.is_server() is True:
-			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, byte_words=byte_words)
+			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, payload_words=payload_words)
 	
 	# Register packet from server or client
-	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
 		# Trigger events (they can block the internal <_register_*> events)
-		if self.base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
+		if self.base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) is not False:
 			if self.is_server() is True:
-				if self.base_event_on_register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
-					self._register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+				if self.base_event_on_register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) is not False:
+					self._register_client_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 			elif self.is_client() is True:
-				if self.base_event_on_register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words) is not False:
-					self._register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, payload_words)
+				if self.base_event_on_register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) is not False:
+					self._register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 	
 	"""
 	OTHER
@@ -1267,8 +1335,11 @@ class Neutrino:
 	DEBUG (Used for debugging purposes)
 	"""
 	# Get packet type name (e.g. string "CLIENT_HELLO1" for PACKET_TYPE_CLIENT_HELLO1)
-	def get_packet_name_by_type(self, packet_type: int) -> str:
-		return self.PACKET_TYPE_NAMES[packet_type]
+	def get_packet_name_by_type(self, packet_type: int, prefix: str='PACKET_') -> str:
+		try:
+			return prefix + self.PACKET_TYPE_NAMES[packet_type]
+		except KeyError:
+			return 'UNKNOWN_PACKET_TYPE'
 	
 	"""
 	EVENTS
@@ -1285,11 +1356,11 @@ class Neutrino:
 		return
 		
 	# Received any unencrypted packet
-	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		return
 		
 	# Sent any packet (encrypted or unprotected)
-	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, byte_words: list, packet_type: int, packet_number: int) -> None:
+	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		return
 		
 	# Packet was dropped
@@ -1297,13 +1368,13 @@ class Neutrino:
 		return
 	
 	# Packets to be processed after they have been received
-	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
 		return True
 		
-	def base_event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
 		return True
 		
-	def base_event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, payload_words: tuple) -> bool:
+	def base_event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
 		return True
 		
 	# Session for a new client established
