@@ -27,7 +27,7 @@ from typing import Optional
 An extended Neutrino class to introduce some
 robustness and reliability.
 
-Neutrino > NeutrinoReliable
+Neutrino > NeutrinoReliable [> NeutrinoExtended]
 """
 class NeutrinoReliable(Neutrino):
 	"""
@@ -118,20 +118,23 @@ class NeutrinoReliable(Neutrino):
 	EVENTS: Neutrino
 	"""
 	# Reset traffic buffers before connecting
-	def base_event_on_connecting_to_server(self) -> None:
-		super().base_event_on_connecting_to_server()
+	def base_client_event_on_request_session(self) -> None:
+		super().base_client_event_on_request_session()
 		
 		self.buffer_incoming = {}
 		self.buffer_outgoing = {}
 	
 	# Delete traffic buffers for client
-	def base_event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
-		super().base_event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
-		
+	def base_server_event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
+		super().base_server_event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
+
 		del self.buffer_incoming[client_id]
-		del self.buffer_outgoing[client_id]
+		
+		# Can be undefined if server refused to answer to the client (see CLIENT_UNREGISTER_REASON_REFUSED)
+		if client_id in self.buffer_outgoing:
+			del self.buffer_outgoing[client_id]
 	
-	# Hook into Neutrino::base_event_on_register_any_packet() handle PACKET_TYPE_REQUEST_RETRANSMISSION and PACKET_TYPE_KEEP_ALIVE
+	# Hook into Neutrino::base_event_on_register_any_packet() to handle PACKET_TYPE_REQUEST_RETRANSMISSION and PACKET_TYPE_KEEP_ALIVE
 	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:		
 		super().base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
@@ -202,7 +205,7 @@ class NeutrinoReliable(Neutrino):
 					# Calculate Round Trip Time (RTT) from it. That is reliable, because packets are guaranteed
 					# to be in order. Hence, e.g. if the KEEP_ALIVE was lost and then be retransmitted, of course
 					# the RTT will increase; see also the explanation at EXPECTED_AVERAGE_ROUND_TRIP_TIME.
-					round_trip_time = (self._time_milliseconds() - self._int64_from_bytes(time_sent_milliseconds))
+					round_trip_time = (self._get_current_time_milliseconds() - self._int64_from_bytes(time_sent_milliseconds))
 					
 					# Statistics: Set latest RTT, append latest RTT to recording list, update RTT recording list sum
 					self.statistics['latest_round_trip_time'] = round_trip_time
@@ -225,7 +228,7 @@ class NeutrinoReliable(Neutrino):
 	# Record any incoming packets to spot any loss and distribute these packets later in a reliable way
 	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, received_packet_number: int, received_packet_keyword: int, payload_words: tuple) -> None:
 		super().base_event_on_packet_received(client_id, session_id, remote_addr_pair, raw_packet, packet_type, received_packet_number, received_packet_keyword, payload_words)
-		
+
 		# The actual client id or None for the server (converted to -1)
 		endpoint_id = client_id or -1
 		
@@ -267,7 +270,7 @@ class NeutrinoReliable(Neutrino):
 				"""
 				if packet_type not in [self.PACKET_TYPE_SERVER_HELLO2, self.PACKET_TYPE_CLIENT_HELLO3]:
 					print("HERE ERROR", packet_type)
-					raise NeutrinoReliable.NetworkError.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Received unexpected packet type {0}. Either loss happened or packets were out of order during authentication.'.format(self._get_int_repr(packet_type)))
+					raise NeutrinoReliable.NetworkError.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Received unexpected packet type {0}. Either loss happened or packets were out of order during authentication.'.format(self._get_default_int_repr(packet_type)))
 				
 				# Initiate with very first received packet number
 				self.buffer_incoming[endpoint_id]['latest_confirmed_packet_number'] = received_packet_number
@@ -322,7 +325,7 @@ class NeutrinoReliable(Neutrino):
 							
 							# Make sure that missing packets are not again requested to be retransmitted
 							# without waiting for success for a short period of time.
-							if self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] < self._time_milliseconds():
+							if self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] < self._get_current_time_milliseconds():
 								# Increment number of retransmission requests
 								self.requested_retransmission[endpoint_id][missing_packet_number]['count'] += 1
 								
@@ -331,9 +334,9 @@ class NeutrinoReliable(Neutrino):
 								
 								# Raise timeout if this will be the third attempt
 								if self.requested_retransmission[endpoint_id][missing_packet_number]['count'] >= 3:
-									self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] = (self._time_milliseconds() + self.SLOW_RETRANSMISSION_TIMEOUT)
+									self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] = (self._get_current_time_milliseconds() + self.SLOW_RETRANSMISSION_TIMEOUT)
 								else:
-									self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] = (self._time_milliseconds() + self.FAST_RETRANSMISSION_TIMEOUT)
+									self.requested_retransmission[endpoint_id][missing_packet_number]['request_expire_time'] = (self._get_current_time_milliseconds() + self.FAST_RETRANSMISSION_TIMEOUT)
 								
 								# Append to retransmission list
 								packet_numbers_for_retransmission.append(missing_packet_number)
@@ -447,7 +450,7 @@ class NeutrinoReliable(Neutrino):
 		# Append current timestamp in milliseconds, but only for clients, the server will just
 		# send back the clients value; see self.base_event_on_register_any_packet()
 		if self.is_client() is True:
-			current_time_milliseconds = self._time_milliseconds()
+			current_time_milliseconds = self._get_current_time_milliseconds()
 			payload_words = payload_words + [self._int64_to_bytes(current_time_milliseconds)]
 		
 		# Append latest confirmed packet number
