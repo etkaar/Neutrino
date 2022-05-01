@@ -2,6 +2,16 @@
 '''
 Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
 
+Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
+revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
+license text below is valid with the exception, that in modification of
+the license, for any right granted there (especially the use, modification
+and distribution) the author has the right of fair compensation which must
+be individually agreed. Is the legal entity part of a multinational company,
+the total revenue of all corporations counts. This restriction does not
+apply to non-profit organizations. This text must be included in all
+copies or substantial portions of the source code.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -91,7 +101,7 @@ class Neutrino:
 	FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS: str = 'B' # Unsigned char (1 byte)
 	FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE: str = 'H' # Unsigned short (2 bytes)
 	
-	# All packages, except the PACKET_TYPE_CLIENT_HELLO1, are encrypted
+	# All packets, except the PACKET_TYPE_CLIENT_HELLO1, are encrypted
 	PACKET_TYPE_CLIENT_HELLO1: int = 0x01
 	PACKET_TYPE_SERVER_HELLO2: int = 0x02
 	PACKET_TYPE_CLIENT_HELLO3: int = 0x03
@@ -167,11 +177,14 @@ class Neutrino:
 	SESSION_TIMEOUT_PENDING: int = 250
 	SESSION_TIMEOUT_ESTABLISHED: int = 1500
 	
-	# (Must be lower than SESSION_TIMEOUT_ESTABLISHED and greater than SESSION_TIMEOUT_PENDING)
-	#
 	# Time in milliseconds after a KEEP_ALIVE packet is sent if there is no communication between
 	# the endpoints observed. This functionality is mandatory for the loss detection used
 	# in NeutrinoExtended, so do not increase this value without a good reason.
+	#
+	# NOTE: Must be lower than SESSION_TIMEOUT_ESTABLISHED to keep session alive and
+	# greater than SESSION_TIMEOUT_PENDING, because KEEP_ALIVE is only allowed for
+	# established sessions. I used a third (1/3) of SESSION_TIMEOUT_ESTABLISHED here,
+	# while using the half of KEEP_ALIVE_PACKET_TIMEOUT for SESSION_TIMEOUT_PENDING.
 	KEEP_ALIVE_PACKET_TIMEOUT: int = 500
 	
 	# Max client id size
@@ -187,10 +200,15 @@ class Neutrino:
 	# Reconnect timeout (milliseconds) if the previous reconnect attempt was not successful
 	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: int = 3000
 	
-	# Used for the <on_client_unregistered> event
+	# Used for <base_server_event_on_client_unregistered>.
+	#
+	# CLIENT_UNREGISTER_REASON_VIOLATION:
+	#	The client acted unexpectedly by sending malformed packets or specific packet types at the wrong time. This
+	#	error is caused due to programming errors. The session is immediately destroyed in that case.
 	CLIENT_UNREGISTER_REASON_CLOSE: int = 0x01
 	CLIENT_UNREGISTER_REASON_REFUSED: int = 0x02
 	CLIENT_UNREGISTER_REASON_TIMEOUT: int = 0x03
+	CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: int = 0x04
 	
 	"""
 	CONSTANTS: DEBUG (Used for debugging purposes)
@@ -202,6 +220,13 @@ class Neutrino:
 		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
 		PACKET_TYPE_CLOSE: 'CLOSE',
 		PACKET_TYPE_DATA: 'DATA'
+	}
+	
+	CLIENT_UNREGISTER_REASON_NAMES: dict = {
+		CLIENT_UNREGISTER_REASON_CLOSE: 'CLOSE',
+		CLIENT_UNREGISTER_REASON_REFUSED: 'REFUSED',
+		CLIENT_UNREGISTER_REASON_TIMEOUT: 'TIMEOUT',
+		CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: 'PROTOCOL_VIOLATION'
 	}
 	
 	"""
@@ -288,6 +313,10 @@ class Neutrino:
 	
 	# Initialize endpoint with host and port
 	def init(self, host: str, port: int, server: bool=False):
+		# Validate some configuration variables
+		self.run_checks()
+		
+		# Configure endpoint
 		self.host = host
 		self.port = port
 		self.server = server
@@ -312,6 +341,13 @@ class Neutrino:
 	"""
 	def tests(self) -> None:
 		return
+		
+	"""
+	RUN CHECKS
+	"""
+	def run_checks(self) -> None:
+		if self.KEEP_ALIVE_PACKET_TIMEOUT >= self.SESSION_TIMEOUT_ESTABLISHED or self.KEEP_ALIVE_PACKET_TIMEOUT <= self.SESSION_TIMEOUT_PENDING:
+			raise Neutrino.ConfigurationError('Value for KEEP_ALIVE_PACKET_TIMEOUT ({0}) must be greater than SESSION_TIMEOUT_ESTABLISHED ({1}) and lower than SESSION_TIMEOUT_PENDING ({2}).'.format(self.KEEP_ALIVE_PACKET_TIMEOUT, self.SESSION_TIMEOUT_ESTABLISHED, self.SESSION_TIMEOUT_PENDING))
 	
 	"""
 	LOOP & TICKERS
@@ -347,6 +383,9 @@ class Neutrino:
 					
 				# Drop unexpected packets
 				except Neutrino.NetworkError.UnexpectedPacket as message:
+					if self.is_server() is True:
+						self._unregister_client(self.CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION, client_id)
+						
 					raise Neutrino.Instruction.DropThisPacket(message)
 			
 			# Silently drop and trigger event
@@ -403,7 +442,7 @@ class Neutrino:
 					# Set timeout for next retry
 					self.client_reattempt_connection_time = (self._get_current_time_milliseconds() + self.CLIENT_CONNECTION_TIMEOUT_REATTEMPT)
 			else:
-				# Periodically send KEEP_ALIVE packets to validate the connection
+				# Periodically send KEEP_ALIVE packets to keep alive the session
 				if self.client_last_packet_sent_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._get_current_time_milliseconds():
 					self._send_keep_alive_packet(None, None)
 	
@@ -572,7 +611,7 @@ class Neutrino:
 			
 		return raw_payload_bytes
 		
-	# Encrypt encoded package (= encode and then encrypt)
+	# Encrypt encoded packet (= encode and then encrypt)
 	def _encrypt_encoded_packet(self, raw_key: bytes, raw_packet: bytes) -> bytes:
 		# Header is partially encrypted and payload is fully encrypted
 		(left_unprotected, right_encrypted) = (raw_packet[0:self.HEADER_SIZE_LEFT], raw_packet[self.HEADER_SIZE_LEFT:])
@@ -746,7 +785,7 @@ class Neutrino:
 		# packet and discard any remaining bytes.
 		# 
 		# (However, at this point, we would always fetch the
-		# maximum for a UDP package which is 64 KiB).
+		# maximum for a UDP packet which is 64 KiB).
 		#
 		# Throws BlockingIOError in non-blocking mode, if
 		# there are no packets left to read. Not relevant here,
@@ -780,7 +819,7 @@ class Neutrino:
 			# Find out the secret encryption (write) key
 			raw_key = self._get_client_session_read_key_by_client_id(client_id)
 		
-			# Encrypted encoded package => Decrypted encoded package
+			# Encrypted encoded packet => Decrypted encoded packet
 			try:
 				raw_packet = self._decrypt_encoded_packet(raw_key=raw_key, raw_packet=raw_packet)
 			except Neutrino.LocalCryptoError.DecryptionFailed:
@@ -811,7 +850,7 @@ class Neutrino:
 		
 		# Only, if session id must be given
 		if self._is_not_pending_client_session_id(session_id):
-			# Encrypted encoded package => Decrypted encoded package
+			# Encrypted encoded packet => Decrypted encoded packet
 			raw_packet = self._decrypt_encoded_packet(raw_key=self.client_read_key, raw_packet=raw_packet)
 		
 		# Decode and validate the part of the decrypted protected header, then, decode and validate payload
@@ -894,7 +933,7 @@ class Neutrino:
 		
 	# Send packet to a client
 	def _send_to_client(self, client_id: int, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
-		# Get current clients session package number and increment it afterwards
+		# Get current clients session packet number and increment it afterwards
 		packet_number = self._get_servers_client_session_packet_number(client_id=client_id, increment=True)
 		
 		# Send packet to client
@@ -906,7 +945,7 @@ class Neutrino:
 		
 		# As long it is not the initial client's HELLO packet
 		if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO1]:
-			# Get current clients package number and increment it afterwards
+			# Get current clients packet number and increment it afterwards
 			packet_number = self._get_clients_packet_number(increment=True)
 		
 		# Send packet to server
@@ -936,10 +975,11 @@ class Neutrino:
 	
 	# Pass through all clients and delete all information about clients which timed out
 	def _check_for_timed_out_clients(self):
-		for client_id in list(self.client_sessions):
+		pass
+		#for client_id in list(self.client_sessions):
 			# Session is expired
-			if self.client_sessions[client_id]['local_session_expire_time'] < self._get_current_time_milliseconds():
-				(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
+			#if self.client_sessions[client_id]['local_session_expire_time'] < self._get_current_time_milliseconds():
+			#	(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
 	
 	# Adds a new client
 	def _register_client(self, client_ip: str, client_port: int) -> int:
@@ -1161,11 +1201,11 @@ class Neutrino:
 				# Store session id locally
 				self.client_session_id = session_id
 				
+				# Trigger event
+				self.base_client_event_on_session_establishing(self.client_session_id)
+				
 				# Send out final handshake packet to explicitly confirm the session establishment
 				self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO3, session_id=self.client_session_id)
-				
-				# Trigger event
-				self.base_client_event_on_session_established(self.client_session_id)
 	
 		# Update precalculated time when the session ends
 		session_timeout = self.SESSION_TIMEOUT_PENDING
@@ -1351,6 +1391,13 @@ class Neutrino:
 	"""
 	DEBUG (Used for debugging purposes)
 	"""
+	# Get unregister reason name (e.g. "Timeout" for CLIENT_UNREGISTER_REASON_TIMEOUT) by number
+	def get_unregister_reason_name_by_number(self, reason: int, prefix: str='CLIENT_UNREGISTER_REASON_') -> str:
+		try:
+			return prefix + self.CLIENT_UNREGISTER_REASON_NAMES[reason]
+		except KeyError:
+			return 'UNKNOWN_CLIENT_UNREGISTER_REASON'
+		
 	# Get packet type name (e.g. string "CLIENT_HELLO1" for PACKET_TYPE_CLIENT_HELLO1)
 	def get_packet_name_by_type(self, packet_type: int, prefix: str='PACKET_') -> str:
 		try:
@@ -1422,12 +1469,15 @@ class Neutrino:
 		return
 	
 	# Client received encrypted PACKET_TYPE_SERVER_HELLO2, thus, connection to server successfully established. Client is going to respond with a final PACKET_TYPE_CLIENT_HELLO3.
-	def base_client_event_on_session_established(self, session_id: int) -> None:
+	def base_client_event_on_session_establishing(self, session_id: int) -> None:
 		return
 	
 	"""
 	EXCEPTIONS
 	"""
+	class ConfigurationError(Exception):
+		__module__ = Exception.__module__
+		
 	class LogicError(Exception):
 		__module__ = Exception.__module__
 		
@@ -1474,7 +1524,7 @@ class Neutrino:
 	# Not an error or nothing which needs to be considered of
 	class Instruction(Exception):
 		# Packet which leads to an error (e.g. expired client sessions,
-		# malformed packages). Since the server is not able to fix any
+		# malformed packets). Since the server is not able to fix any
 		# client side issues, you want to drop all these packets.
 		class DropThisPacket(Exception):
 			__module__ = Exception.__module__
