@@ -56,7 +56,8 @@ import nacl.secret
 from typing import Optional
 
 """
-The basic Neutrino class which offers encryption.
+The basic Neutrino class which offers encryption, but no reliability such as
+packet loss or double-spend detection. Payload size is limited by MAX_PAYLOAD_SIZE.
 
 Neutrino [> NeutrinoReliable > NeutrinoExtended]
 """
@@ -106,10 +107,10 @@ class Neutrino:
 	PACKET_TYPE_SERVER_HELLO2: int = 0x02
 	PACKET_TYPE_CLIENT_HELLO3: int = 0x03
 	PACKET_TYPE_KEEP_ALIVE: int = 0x04
-	PACKET_TYPE_CLOSE: int = 0x05
+	PACKET_TYPE_CLIENT_GOOD_BYE: int = 0x05
 	PACKET_TYPE_DATA: int = 0x40
 	
-	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO1, PACKET_TYPE_SERVER_HELLO2, PACKET_TYPE_CLIENT_HELLO3, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_CLOSE, PACKET_TYPE_DATA]
+	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO1, PACKET_TYPE_SERVER_HELLO2, PACKET_TYPE_CLIENT_HELLO3, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_CLIENT_GOOD_BYE, PACKET_TYPE_DATA]
 	
 	# For best network compatibility, we choose a relatively small
 	# UDP packet size; see the QUIC protocol for more information.
@@ -205,8 +206,8 @@ class Neutrino:
 	# CLIENT_UNREGISTER_REASON_VIOLATION:
 	#	The client acted unexpectedly by sending malformed packets or specific packet types at the wrong time. This
 	#	error is caused due to programming errors. The session is immediately destroyed in that case.
-	CLIENT_UNREGISTER_REASON_CLOSE: int = 0x01
-	CLIENT_UNREGISTER_REASON_REFUSED: int = 0x02
+	CLIENT_UNREGISTER_REASON_CLIENT_GOOD_BYE: int = 0x01
+	CLIENT_UNREGISTER_REASON_SERVER_REFUSED: int = 0x02
 	CLIENT_UNREGISTER_REASON_TIMEOUT: int = 0x03
 	CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: int = 0x04
 	
@@ -218,13 +219,13 @@ class Neutrino:
 		PACKET_TYPE_SERVER_HELLO2: 'SERVER_HELLO2',
 		PACKET_TYPE_CLIENT_HELLO3: 'CLIENT_HELLO3',
 		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
-		PACKET_TYPE_CLOSE: 'CLOSE',
+		PACKET_TYPE_CLIENT_GOOD_BYE: 'CLIENT_GOOD_BYE',
 		PACKET_TYPE_DATA: 'DATA'
 	}
 	
 	CLIENT_UNREGISTER_REASON_NAMES: dict = {
-		CLIENT_UNREGISTER_REASON_CLOSE: 'CLOSE',
-		CLIENT_UNREGISTER_REASON_REFUSED: 'REFUSED',
+		CLIENT_UNREGISTER_REASON_CLIENT_GOOD_BYE: 'CLIENT_GOOD_BYE',
+		CLIENT_UNREGISTER_REASON_SERVER_REFUSED: 'SERVER_REFUSED',
 		CLIENT_UNREGISTER_REASON_TIMEOUT: 'TIMEOUT',
 		CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: 'PROTOCOL_VIOLATION'
 	}
@@ -263,7 +264,7 @@ class Neutrino:
 	client_local_session_expire_time: int = 0
 	
 	# Time in milliseconds of the very last packet we sent;
-	# used to prevent unnecessarily KEEP_ALIVE packets.
+	# used to prevent unnecessary KEEP_ALIVE packets.
 	client_last_packet_sent_time: int = 0
 	
 	# Calculated time (milliseconds) after client tries to reconnect to the server
@@ -971,15 +972,25 @@ class Neutrino:
 		if self.client_session_id is None:
 			raise Neutrino.NetworkError.NotConnected('Client is not connected to server.')
 			
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLOSE, session_id=self.client_session_id)
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
+	
+	# Get this client endpoints session id
+	def get_this_client_session_id(self):
+		return self.client_session_id
+	
+	# Check if client endpoint is connected to the server
+	def connected_to_server(self):
+		if self.client_session_id is not None:
+			return True
+	
+		return False	
 	
 	# Pass through all clients and delete all information about clients which timed out
 	def _check_for_timed_out_clients(self):
-		pass
-		#for client_id in list(self.client_sessions):
+		for client_id in list(self.client_sessions):
 			# Session is expired
-			#if self.client_sessions[client_id]['local_session_expire_time'] < self._get_current_time_milliseconds():
-			#	(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
+			if self.client_sessions[client_id]['local_session_expire_time'] < self._get_current_time_milliseconds():
+				(client_ip, client_port, session_id) = self._unregister_client(self.CLIENT_UNREGISTER_REASON_TIMEOUT, client_id)
 	
 	# Adds a new client
 	def _register_client(self, client_ip: str, client_port: int) -> int:
@@ -1108,7 +1119,7 @@ class Neutrino:
 			# Trigger event
 			self.base_server_event_on_client_addr_change(client_id, old_client_ip, old_client_port, new_client_ip, new_client_port)
 	
-	# Get (and possibly increment) the servers packet number for a specific client session
+	# Get (and optionally increment) the servers packet number for a specific client session
 	def _get_servers_client_session_packet_number(self, client_id: int, increment: bool=False):
 		packet_number = self.client_sessions[client_id]['packet_number']
 		
@@ -1117,7 +1128,7 @@ class Neutrino:
 			
 		return packet_number
 	
-	# Get (and possibly increment) the clients sending packet number
+	# Get (and optionally increment) the clients sending packet number
 	def _get_clients_packet_number(self, increment: bool=False):
 		# Generate initial random packet number which is used
 		# for packets sent to the server
@@ -1170,17 +1181,6 @@ class Neutrino:
 			return True
 			
 		return False
-	
-	# Get this client endpoints session id
-	def get_this_client_session_id(self):
-		return self.client_session_id
-	
-	# Check if client endpoint is connected to the server
-	def connected_to_server(self):
-		if self.client_session_id is not None:
-			return True
-	
-		return False
 		
 	# Register packet from the server
 	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
@@ -1215,11 +1215,22 @@ class Neutrino:
 			session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
 		
 		# Precalculate time when the session ends
-		self.client_local_session_expire_time = (self._get_current_time_milliseconds() + session_timeout)	
+		self.client_local_session_expire_time = (self._get_current_time_milliseconds() + session_timeout)
 	
 	"""
 	SERVER
 	"""
+	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
+	def send_to_authenticated_clients(self, payload_words) -> None:
+		# Pass through all sessions
+		for client_id, session in self.client_sessions.items():
+			if session['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
+				self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_DATA, session_id=session['session_id'], payload_words=payload_words)
+		
+		#_send_to_client(self, client_id: int, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
+		
+		return
+	
 	# Register packet from any client
 	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
 		session_state = self.client_sessions[client_id]['session_state']
@@ -1263,7 +1274,7 @@ class Neutrino:
 						
 						# Connection refused
 						if self.base_server_event_on_session_request(client_id, session_id, client_ip, client_port) is not True:
-							self._unregister_client(self.CLIENT_UNREGISTER_REASON_REFUSED, client_id)
+							self._unregister_client(self.CLIENT_UNREGISTER_REASON_SERVER_REFUSED, client_id)
 						else:
 							# Derive and store per-connection read and write encryption keys
 							(self.client_sessions[client_id]['read_key'], self.client_sessions[client_id]['write_key']) = self._derive_server_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, client_public_key)
@@ -1299,7 +1310,7 @@ class Neutrino:
 		# Any other packets after session establishment
 		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
 			# Drop any unexpected packets
-			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_CLOSE]:
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_CLIENT_GOOD_BYE]:
 				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_default_int_repr(packet_type)))
 			else:
 				# Respond to KEEP_ALIVE packet with KEEP_ALIVE packet
@@ -1307,10 +1318,10 @@ class Neutrino:
 					self._send_keep_alive_packet(client_id=client_id, session_id=session_id)
 					
 				# Client wants to close the connection
-				elif packet_type is self.PACKET_TYPE_CLOSE:
-					self._unregister_client(self.CLIENT_UNREGISTER_REASON_CLOSE, client_id)
+				elif packet_type is self.PACKET_TYPE_CLIENT_GOOD_BYE:
+					self._unregister_client(self.CLIENT_UNREGISTER_REASON_CLIENT_GOOD_BYE, client_id)
 		
-		# As long client did not close the connection (PACKET_TYPE_CLOSE)
+		# As long client did not close the connection (PACKET_TYPE_CLIENT_GOOD_BYE)
 		if client_id in self.client_sessions:
 			# Update precalculated time when the session ends
 			session_timeout = self.SESSION_TIMEOUT_PENDING
@@ -1350,11 +1361,14 @@ class Neutrino:
 		
 	def is_client(self) -> bool:
 		return (not self.is_server())
-		
+	
+	"""
+	Remove
 	# Close this server or client endpoint
 	def close(self) -> None:
 		self.endpoint.close()
 		del self.endpoint
+	"""
 		
 	# Just throws an exception if amount of words is
 	# not equal to the expected
@@ -1398,7 +1412,7 @@ class Neutrino:
 		except KeyError:
 			return 'UNKNOWN_CLIENT_UNREGISTER_REASON'
 		
-	# Get packet type name (e.g. string "CLIENT_HELLO1" for PACKET_TYPE_CLIENT_HELLO1)
+	# Get packet type name (e.g. "CLIENT_HELLO1" for PACKET_TYPE_CLIENT_HELLO1)
 	def get_packet_name_by_type(self, packet_type: int, prefix: str='PACKET_') -> str:
 		try:
 			return prefix + self.PACKET_TYPE_NAMES[packet_type]
