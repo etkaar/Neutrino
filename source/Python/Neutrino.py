@@ -108,9 +108,10 @@ class Neutrino:
 	PACKET_TYPE_CLIENT_HELLO3: int = 0x03
 	PACKET_TYPE_KEEP_ALIVE: int = 0x04
 	PACKET_TYPE_CLIENT_GOOD_BYE: int = 0x05
+	PACKET_TYPE_SERVER_SHUTDOWN: int = 0x06
 	PACKET_TYPE_DATA: int = 0x40
 	
-	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO1, PACKET_TYPE_SERVER_HELLO2, PACKET_TYPE_CLIENT_HELLO3, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_CLIENT_GOOD_BYE, PACKET_TYPE_DATA]
+	PACKET_TYPES: list = [PACKET_TYPE_CLIENT_HELLO1, PACKET_TYPE_SERVER_HELLO2, PACKET_TYPE_CLIENT_HELLO3, PACKET_TYPE_KEEP_ALIVE, PACKET_TYPE_CLIENT_GOOD_BYE, PACKET_TYPE_SERVER_SHUTDOWN, PACKET_TYPE_DATA]
 	
 	# For best network compatibility, we choose a relatively small
 	# UDP packet size; see the QUIC protocol for more information.
@@ -220,6 +221,7 @@ class Neutrino:
 		PACKET_TYPE_CLIENT_HELLO3: 'CLIENT_HELLO3',
 		PACKET_TYPE_KEEP_ALIVE: 'KEEP_ALIVE',
 		PACKET_TYPE_CLIENT_GOOD_BYE: 'CLIENT_GOOD_BYE',
+		PACKET_TYPE_SERVER_SHUTDOWN: 'SERVER_SHUTDOWN',
 		PACKET_TYPE_DATA: 'DATA'
 	}
 	
@@ -421,8 +423,7 @@ class Neutrino:
 			
 			# Invalidate session once expired
 			if self.client_local_session_expire_time > 0 and self.client_local_session_expire_time < self._get_current_time_milliseconds():
-				self.client_session_id = None
-				self.client_packet_number = None
+				self._destroy_session()
 				
 				# Session expired
 				if self.client_local_session_expire_time > 0:
@@ -436,7 +437,7 @@ class Neutrino:
 					pass
 			
 			# Establish encrypted session to the server
-			if self.connected_to_server() is False:
+			if self.is_connected_to_server() is False:
 				if self.client_reattempt_connection_time < self._get_current_time_milliseconds():
 					self.connect_to_server()
 					
@@ -940,6 +941,15 @@ class Neutrino:
 		# Send packet to client
 		return self._send_packet(client_id, session_id, None, packet_type, packet_number, self.PACKET_KEYWORD_NONE, None, payload_words, padding)
 
+	# Send packet to all clients with a established session
+	def _send_to_authenticated_clients(self, packet_type: int, payload_words: list=[], padding: int=0) -> None:
+		# Pass through all sessions
+		for client_id, session in self.client_sessions.items():
+			if session['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
+				self._send_to_client(client_id, packet_type, session['session_id'], payload_words, padding)
+		
+		return
+
 	# Send packet to the server
 	def _send_to_server(self, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
 		packet_number = self.PACKET_NUMBER_PENDING
@@ -956,7 +966,7 @@ class Neutrino:
 	CLIENTS
 	"""
 	# Prepare connection to the server
-	def connect_to_server(self):
+	def connect_to_server(self) -> None:
 		# Generate new client keypair for each connection attempt
 		self._reload_local_crypto_keys()
 	
@@ -966,27 +976,33 @@ class Neutrino:
 		
 		# Trigger event
 		self.base_client_event_on_request_session()
-		
-	# Close connection to the server
-	def close_connection_to_server(self):
-		if self.client_session_id is None:
-			raise Neutrino.NetworkError.NotConnected('Client is not connected to server.')
-			
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
-	
-	# Get this client endpoints session id
-	def get_this_client_session_id(self):
-		return self.client_session_id
 	
 	# Check if client endpoint is connected to the server
-	def connected_to_server(self):
+	def is_connected_to_server(self) -> bool:
 		if self.client_session_id is not None:
 			return True
 	
-		return False	
+		return False
+	
+	# Close connection to the server
+	def close_connection_to_server(self) -> None:
+		if self.is_connected_to_server() is False:
+			raise Neutrino.NetworkError.NotConnected('Client is not connected to server.')
+		
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
+		self._destroy_session()
+	
+	# Get this client endpoints session id
+	def get_this_client_session_id(self) -> int:
+		return self.client_session_id
+	
+	# Destroy client session
+	def _destroy_session(self) -> None:
+		self.client_session_id = None
+		self.client_packet_number = None	
 	
 	# Pass through all clients and delete all information about clients which timed out
-	def _check_for_timed_out_clients(self):
+	def _check_for_timed_out_clients(self) -> None:
 		for client_id in list(self.client_sessions):
 			# Session is expired
 			if self.client_sessions[client_id]['local_session_expire_time'] < self._get_current_time_milliseconds():
@@ -1183,13 +1199,17 @@ class Neutrino:
 		return False
 		
 	# Register packet from the server
-	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
+	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		# Client is connected to the server
-		if self.connected_to_server() is True:
+		if self.is_connected_to_server() is True:
 			# Ensure only packet types specific for established sessions are sent
-			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA]:
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_SERVER_SHUTDOWN]:
 				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by server (connected).'.format(self._get_default_int_repr(packet_type)))
-		
+			
+			# Server is not available any more due to shutdown
+			if packet_type is self.PACKET_TYPE_SERVER_SHUTDOWN:
+				pass
+				
 		# Needs to establish connection first
 		else:
 			# Ensure only packet types specific for unestablished sessions are sent
@@ -1211,7 +1231,7 @@ class Neutrino:
 		session_timeout = self.SESSION_TIMEOUT_PENDING
 
 		# Will be higher for established sessions
-		if self.connected_to_server():
+		if self.is_connected_to_server():
 			session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
 		
 		# Precalculate time when the session ends
@@ -1219,20 +1239,9 @@ class Neutrino:
 	
 	"""
 	SERVER
-	"""
-	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
-	def send_to_authenticated_clients(self, payload_words) -> None:
-		# Pass through all sessions
-		for client_id, session in self.client_sessions.items():
-			if session['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
-				self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_DATA, session_id=session['session_id'], payload_words=payload_words)
-		
-		#_send_to_client(self, client_id: int, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
-		
-		return
-	
+	"""	
 	# Register packet from any client
-	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
+	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		session_state = self.client_sessions[client_id]['session_state']
 
 		# Client tries to establish a new session by sending
@@ -1335,6 +1344,21 @@ class Neutrino:
 	"""
 	SERVER / CLIENTS
 	"""
+	# Close endpoint
+	def shutdown(self):
+		# Tell all connected clients that server is shutting down
+		if self.is_server() is True:
+			self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_SERVER_SHUTDOWN)
+		# Terminate session with PACKET_TYPE_CLIENT_GOOD_BYE
+		elif self.is_client() is True:
+			if self.is_connected_to_server():
+				self.close_connection_to_server()
+		
+		# Undefine endpoint
+		self.endpoint.close()
+		del self.endpoint
+	
+	# Send PACKET_TYPE_KEEP_ALIVE to server/client
 	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], payload_words: list=[]) -> None:
 		if self.is_client() is True:
 			self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
@@ -1342,7 +1366,7 @@ class Neutrino:
 			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, payload_words=payload_words)
 	
 	# Register packet from server or client
-	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
+	def _register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		# Trigger events (they can block the internal <_register_*> events)
 		if self.base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) is not False:
 			if self.is_server() is True:
@@ -1361,14 +1385,6 @@ class Neutrino:
 		
 	def is_client(self) -> bool:
 		return (not self.is_server())
-	
-	"""
-	Remove
-	# Close this server or client endpoint
-	def close(self) -> None:
-		self.endpoint.close()
-		del self.endpoint
-	"""
 		
 	# Just throws an exception if amount of words is
 	# not equal to the expected
@@ -1446,13 +1462,13 @@ class Neutrino:
 		return
 	
 	# Packets to be processed after they have been received
-	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
+	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> bool:
 		return True
 		
-	def base_event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
+	def base_event_on_register_client_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> bool:
 		return True
 		
-	def base_event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:
+	def base_event_on_register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet_length: int, raw_packet: bytes, packet_number: int, packet_keyword: int, payload_words: list) -> bool:
 		return True
 	
 	"""
