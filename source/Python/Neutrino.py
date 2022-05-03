@@ -45,6 +45,7 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 '''
 import sys
 import time
+import math
 import secrets
 import struct
 import socket
@@ -54,6 +55,8 @@ import nacl.bindings
 import nacl.secret
 
 from typing import Optional
+
+import exceptions.ExceptionsBase as ex
 
 """
 The basic Neutrino class which offers encryption, but no reliability such as
@@ -172,12 +175,13 @@ class Neutrino:
 	INTERNAL_SESSION_STATE_PENDING: int = 1
 	INTERNAL_SESSION_STATE_ESTABLISHED: int = 2
 	
-	CLIENT_SESSION_ID_NONE: int = 0x01
-	CLIENT_SESSION_ID_PENDING: int = 0x02	
+	SESSION_ID_NONE: int = 0x01
+	SESSION_ID_PENDING: int = 0x02	
 	
 	# Time in milliseconds after a session is destroyed when there are no packets received
 	SESSION_TIMEOUT_PENDING: int = 250
 	SESSION_TIMEOUT_ESTABLISHED: int = 1500
+	SESSION_TIMEOUT_ENDING: int = 3000
 	
 	# Time in milliseconds after a KEEP_ALIVE packet is sent if there is no communication between
 	# the endpoints observed. This functionality is mandatory for the loss detection used
@@ -199,7 +203,7 @@ class Neutrino:
 	# did not yet remove the client and assumes it is still connected.
 	CLIENT_CONNECTION_TIMEOUT_SESSION_EXPIRED: int = 1000
 	
-	# Reconnect timeout (milliseconds) if the previous reconnect attempt was not successful
+	# Reconnect timeout (milliseconds) if the previous reconnection attempt was not successful
 	CLIENT_CONNECTION_TIMEOUT_REATTEMPT: int = 3000
 	
 	# Used for <base_server_event_on_client_unregistered>.
@@ -211,6 +215,12 @@ class Neutrino:
 	CLIENT_UNREGISTER_REASON_SERVER_REFUSED: int = 0x02
 	CLIENT_UNREGISTER_REASON_TIMEOUT: int = 0x03
 	CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: int = 0x04
+	
+	# Used for <base_client_event_on_session_destroyed>.
+	CLIENT_SESSION_DESTROY_REASON_CLIENT_GOOD_BYE: int = 0x01
+	CLIENT_SESSION_DESTROY_REASON_TIMEOUT: int = 0x02
+	CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN: int = 0x03
+	CLIENT_SESSION_DESTROY_REASON_PROTOCOL_VIOLATION: int = 0x04
 	
 	"""
 	CONSTANTS: DEBUG (Used for debugging purposes)
@@ -230,6 +240,13 @@ class Neutrino:
 		CLIENT_UNREGISTER_REASON_SERVER_REFUSED: 'SERVER_REFUSED',
 		CLIENT_UNREGISTER_REASON_TIMEOUT: 'TIMEOUT',
 		CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION: 'PROTOCOL_VIOLATION'
+	}
+	
+	CLIENT_SESSION_DESTROY_REASON_NAMES: dict = {
+		CLIENT_SESSION_DESTROY_REASON_CLIENT_GOOD_BYE: 'CLIENT_GOOD_BYE',
+		CLIENT_SESSION_DESTROY_REASON_TIMEOUT: 'TIMEOUT',
+		CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN: 'SERVER_SHUTDOWN',
+		CLIENT_SESSION_DESTROY_REASON_PROTOCOL_VIOLATION: 'PROTOCOL_VIOLATION'
 	}
 	
 	"""
@@ -258,6 +275,8 @@ class Neutrino:
 	"""
 	VARIABLES: CLIENT SIDE ENDPOINT
 	"""
+	client_draining_started: int = 0
+	
 	# Connection session id, packet number, ...
 	client_session_id: int = None
 	client_packet_number: int = None
@@ -335,7 +354,7 @@ class Neutrino:
 		# Read events
 		self.selector = selectors.DefaultSelector()
 		self.selector.register(self.endpoint, selectors.EVENT_READ, None)
-		
+			
 		# Invoke tests
 		self.tests()
 		
@@ -350,13 +369,16 @@ class Neutrino:
 	"""
 	def run_checks(self) -> None:
 		if self.KEEP_ALIVE_PACKET_TIMEOUT >= self.SESSION_TIMEOUT_ESTABLISHED or self.KEEP_ALIVE_PACKET_TIMEOUT <= self.SESSION_TIMEOUT_PENDING:
-			raise Neutrino.ConfigurationError('Value for KEEP_ALIVE_PACKET_TIMEOUT ({0}) must be greater than SESSION_TIMEOUT_ESTABLISHED ({1}) and lower than SESSION_TIMEOUT_PENDING ({2}).'.format(self.KEEP_ALIVE_PACKET_TIMEOUT, self.SESSION_TIMEOUT_ESTABLISHED, self.SESSION_TIMEOUT_PENDING))
+			raise ex.ConfigurationError('Value for KEEP_ALIVE_PACKET_TIMEOUT ({0}) must be greater than SESSION_TIMEOUT_ESTABLISHED ({1}) and lower than SESSION_TIMEOUT_PENDING ({2}).'.format(self.KEEP_ALIVE_PACKET_TIMEOUT, self.SESSION_TIMEOUT_ESTABLISHED, self.SESSION_TIMEOUT_PENDING))
 	
 	"""
 	LOOP & TICKERS
 	"""
 	# Handles all incoming packets forever
 	def request_frame(self) -> int:
+		if not self.is_endpoint_active():
+			raise ex.NetworkError.NoOpenSocket('No DRGAM (UDP) socket opened.')
+		
 		self.frame_number += 1
 		
 		"""
@@ -385,7 +407,7 @@ class Neutrino:
 					self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 					
 				# Drop unexpected packets
-				except Neutrino.NetworkError.UnexpectedPacket as message:
+				except ex.NetworkError.UnexpectedPacket as message:
 					if self.is_server() is True:
 						self._unregister_client(self.CLIENT_UNREGISTER_REASON_PROTOCOL_VIOLATION, client_id)
 						
@@ -423,7 +445,12 @@ class Neutrino:
 			
 			# Invalidate session once expired
 			if self.client_local_session_expire_time > 0 and self.client_local_session_expire_time < self._get_current_time_milliseconds():
-				self._destroy_session()
+				# Different reason if caused due to server shutdown
+				if self._is_draining() is True:
+					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN)
+					self._disable_draining()
+				else:
+					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_TIMEOUT)
 				
 				# Session expired
 				if self.client_local_session_expire_time > 0:
@@ -471,11 +498,11 @@ class Neutrino:
 			self.local_public_key = bytes.fromhex(local_public_key_hex)
 			self.local_secret_key = bytes.fromhex(local_secret_key_hex)
 		except ValueError as message:
-			raise Neutrino.LocalCryptoError.InvalidPublicOrSecretKey(message) from None
+			raise ex.CryptoError.InvalidPublicOrSecretKey(message) from None
 		
 		# Validate length
 		if len(self.local_public_key) is not self.PUBLIC_KEY_LENGTH or len(self.local_secret_key) is not self.SECRET_KEY_LENGTH:
-			raise Neutrino.LocalCryptoError.InvalidPublicOrSecretKey('Length of public/secret key is expected to be exactly {0}/{1} bytes.'.format(self.PUBLIC_KEY_LENGTH, self.SECRET_KEY_LENGTH))
+			raise ex.CryptoError.InvalidPublicOrSecretKey('Length of public/secret key is expected to be exactly {0}/{1} bytes.'.format(self.PUBLIC_KEY_LENGTH, self.SECRET_KEY_LENGTH))
 	
 	# Loads the public key of the remote endpoint (usually the servers one)
 	def _load_remote_public_key(self, remote_public_key_hex: str=None) -> None:	
@@ -483,10 +510,10 @@ class Neutrino:
 		try:
 			self.remote_public_key = bytes.fromhex(remote_public_key_hex)
 		except ValueError as message:
-			raise Neutrino.LocalCryptoError.InvalidPublicOrSecretKey(message) from None
+			raise ex.CryptoError.InvalidPublicOrSecretKey(message) from None
 		
 		if len(self.remote_public_key) is not self.PUBLIC_KEY_LENGTH:
-			raise Neutrino.LocalCryptoError.InvalidPublicOrSecretKey('Length of public/secret key is expected to be exactly {0}/{1} bytes.'.format(self.PUBLIC_KEY_LENGTH, self.SECRET_KEY_LENGTH))
+			raise ex.CryptoError.InvalidPublicOrSecretKey('Length of public/secret key is expected to be exactly {0}/{1} bytes.'.format(self.PUBLIC_KEY_LENGTH, self.SECRET_KEY_LENGTH))
 	
 	# Used by the client to automatically reload the client's public and secret keys,
 	# initially and, after that, for each further connection attempt.
@@ -528,7 +555,7 @@ class Neutrino:
 		try:
 			return nacl.bindings.crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext=encrypted_plaintext, aad=associated_data, nonce=provided_nonce, key=raw_key)
 		except nacl.exceptions.CryptoError:
-			raise Neutrino.LocalCryptoError.DecryptionFailed
+			raise ex.CryptoError.DecryptionFailed
 			
 	# Alias for libsodium::crypto_kx_keypair()
 	def _generate_keypair(self) -> tuple:
@@ -587,26 +614,26 @@ class Neutrino:
 	# Convert words into payload
 	def _byte_words_to_payload(self, payload_words: list=[]) -> bytes:
 		if type(payload_words) is not list:
-			raise Neutrino.EncodingError("'payload_words' must be a list, containing items of type 'bytes'.")
+			raise ex.EncodingError("'payload_words' must be a list, containing items of type 'bytes'.")
 		
 		# Maximum amount of words must not be exceeded
 		amount_of_byte_words = len(payload_words)
 		
 		if amount_of_byte_words > self.MAX_AMOUNT_OF_PAYLOAD_WORDS:
-			raise Neutrino.EncodingError('Payload must not contain more than {0} words (got {1}).'.format(self.MAX_AMOUNT_OF_PAYLOAD_WORDS, amount_of_byte_words))
+			raise ex.EncodingError('Payload must not contain more than {0} words (got {1}).'.format(self.MAX_AMOUNT_OF_PAYLOAD_WORDS, amount_of_byte_words))
 		
 		# Start with the number of words
 		raw_payload_bytes = self._pack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, amount_of_byte_words)
 		
 		for byte_word in payload_words:
 			if type(byte_word) is not bytes:
-				raise Neutrino.EncodingError("Item in list 'payload_words' must be of type 'bytes': {0}".format(byte_word))
+				raise ex.EncodingError("Item in list 'payload_words' must be of type 'bytes': {0}".format(byte_word))
 			
 			# Maximum word length must not be exceeded
 			word_size = len(byte_word)
 			
 			if word_size > self.MAX_PAYLOAD_WORD_SIZE:
-				raise Neutrino.EncodingError('Size of this word ({0} bytes) would exceed maximum word size of {1} bytes.'.format(word_size, self.MAX_PAYLOAD_WORD_SIZE))
+				raise ex.EncodingError('Size of this word ({0} bytes) would exceed maximum word size of {1} bytes.'.format(word_size, self.MAX_PAYLOAD_WORD_SIZE))
 				
 			raw_payload_bytes += self._pack(self.FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE, word_size)
 			raw_payload_bytes += byte_word
@@ -629,16 +656,16 @@ class Neutrino:
 	# Encode packet from raw bytes words (this does not take care of UTF-8 encodes strings)
 	def _encode_packet(self, packet_type: int, packet_number: int, packet_keyword: int, session_id: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> bytes:
 		if type(packet_type) is not int:
-			raise Neutrino.EncodingError("'packet_type' must be type of 'int', but given: {0}".format(packet_type))
+			raise ex.EncodingError("'packet_type' must be type of 'int', but given: {0}".format(packet_type))
 			
 		if type(packet_number) is not int:
-			raise Neutrino.EncodingError("'packet_number' must be type of 'int', but given: {0}".format(packet_number))
+			raise ex.EncodingError("'packet_number' must be type of 'int', but given: {0}".format(packet_number))
 			
 		if type(packet_keyword) is not int:
-			raise Neutrino.EncodingError("'packet_keyword' must be type of 'int', but given: {0}".format(packet_keyword))
+			raise ex.EncodingError("'packet_keyword' must be type of 'int', but given: {0}".format(packet_keyword))
 			
 		if type(session_id) is not int:
-			raise Neutrino.EncodingError("'session_id' must be type of 'int', but given: {0}".format(session_id))
+			raise ex.EncodingError("'session_id' must be type of 'int', but given: {0}".format(session_id))
 			
 		# Convert byte words list into payload
 		if raw_payload_bytes is None:
@@ -648,7 +675,7 @@ class Neutrino:
 		payload_size = len(raw_payload_bytes)
 		
 		if payload_size > self.MAX_PAYLOAD_SIZE:
-			raise Neutrino.EncodingError('Payload size of this packet ({0} bytes) would exceed maximum size of {1} bytes.'.format(payload_size, self.MAX_PAYLOAD_SIZE))
+			raise ex.EncodingError('Payload size of this packet ({0} bytes) would exceed maximum size of {1} bytes.'.format(payload_size, self.MAX_PAYLOAD_SIZE))
 			
 		# Create header
 		raw_packet = b''
@@ -687,25 +714,25 @@ class Neutrino:
 
 		# Invalid header size
 		if packet_size < self.TOTAL_HEADER_SIZE:
-			raise Neutrino.NetworkError.InvalidPacket('Wrong header size (expected {0}, but got {1}).'.format(self.TOTAL_HEADER_SIZE, packet_size))	
+			raise ex.NetworkError.InvalidPacket('Wrong header size (expected {0}, but got {1}).'.format(self.TOTAL_HEADER_SIZE, packet_size))	
 	
 		try:
 			(protocol_identifier, protocol_version, packet_type, session_id) = self._unpack(self.HEADER_FORMAT_LEFT, raw_packet[0:self.HEADER_SIZE_LEFT])
 		except struct.error as message:
-			raise Neutrino.NetworkError.InvalidPacket(('Malformed header (unprotected part).', message)) from None
+			raise ex.NetworkError.InvalidPacket(('Malformed header (unprotected part).', message)) from None
 		
 		# Validate header information
 		if protocol_identifier != self.PROTOCOL_IDENTIFIER:
-			raise Neutrino.NetworkError.InvalidPacket('Unexpected protocol identifier.')
+			raise ex.NetworkError.InvalidPacket('Unexpected protocol identifier.')
 			
 		if protocol_version not in [self.PROTOCOL_VERSION]:
-			raise Neutrino.NetworkError.InvalidPacket('Incompatible protocol version.')
+			raise ex.NetworkError.InvalidPacket('Incompatible protocol version.')
 			
 		if packet_type not in self.PACKET_TYPES:
-			raise Neutrino.NetworkError.InvalidPacket('Invalid packet type.')
+			raise ex.NetworkError.InvalidPacket('Invalid packet type.')
 			
 		if not self._is_valid_client_session_id(session_id):
-			raise Neutrino.NetworkError.InvalidPacket('Invalid session id.')
+			raise ex.NetworkError.InvalidPacket('Invalid session id.')
 			
 		return (packet_type, session_id)
 	
@@ -724,7 +751,7 @@ class Neutrino:
 		try:
 			(packet_number, packet_keyword) = self._unpack(self.HEADER_FORMAT_RIGHT, raw_packet[self.HEADER_SIZE_LEFT:(self.HEADER_SIZE_LEFT + self.HEADER_SIZE_RIGHT)])
 		except struct.error as message:
-			raise Neutrino.NetworkError.InvalidPacket(('Malformed header (decrypted part).', message)) from None
+			raise ex.NetworkError.InvalidPacket(('Malformed header (decrypted part).', message)) from None
 			
 		return (packet_number, packet_keyword)
 		
@@ -737,13 +764,13 @@ class Neutrino:
 		payload_bytes_size = len(payload_bytes)
 		
 		if payload_bytes_size == 0:
-			raise Neutrino.NetworkError.InvalidPacket('Empty payload received.')
+			raise ex.NetworkError.InvalidPacket('Empty payload received.')
 		
 		# Get and validate amount of payload words 
 		(amount_of_byte_words,) = self._unpack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, payload_bytes[0:self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES])
 		
 		if amount_of_byte_words < 0:
-			raise Neutrino.NetworkError.InvalidPacket("Malformed payload: 'amount_of_byte_words' rendered to an invalid value. Got {0}, but expected a value between 0 and {1}.".format(amount_of_byte_words, self.MAX_AMOUNT_OF_PAYLOAD_WORDS))
+			raise ex.NetworkError.InvalidPacket("Malformed payload: 'amount_of_byte_words' rendered to an invalid value. Got {0}, but expected a value between 0 and {1}.".format(amount_of_byte_words, self.MAX_AMOUNT_OF_PAYLOAD_WORDS))
 		
 		# Place offset after the number of words byte(s)
 		offset = self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES
@@ -758,24 +785,24 @@ class Neutrino:
 				offset += self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES
 				
 				if byte_word_length <= 0:
-					raise Neutrino.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(amount_of_byte_words, self.MAX_PAYLOAD_WORD_SIZE))
+					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(amount_of_byte_words, self.MAX_PAYLOAD_WORD_SIZE))
 				
 				# Byte word ([Word = ? bytes])
 				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
 				offset += byte_word_length
 			except struct.error as e:
-				raise Neutrino.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word <{0}/{1}>, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
+				raise ex.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word <{0}/{1}>, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
 		
 		"""
 		# The right side of the payload needs to be either empty *or* only consist of PACKET_PADDING_CHAR bytes,
 		# which, after stripping, also results the right side to be empty.
 		if len(payload_bytes[offset:].rstrip(self.PACKET_PADDING_CHAR)) != 0:
-			raise Neutrino.NetworkError.InvalidPacket('Unexpected payload size of {0} bytes.'.format(offset))
+			raise ex.NetworkError.InvalidPacket('Unexpected payload size of {0} bytes.'.format(offset))
 		"""
 		unpadded_payload_bytes_size = len(payload_bytes.rstrip(self.PACKET_PADDING_CHAR))
 		
 		if offset < unpadded_payload_bytes_size:
-			raise Neutrino.NetworkError.InvalidPacket('Could not extract all words from payload. Payload may contain unexpected bytes (expected {0} bytes, but received {1}).'.format(offset, unpadded_payload_bytes_size))
+			raise ex.NetworkError.InvalidPacket('Could not extract all words from payload. Payload may contain unexpected bytes (expected {0} bytes, but received {1}).'.format(offset, unpadded_payload_bytes_size))
 		
 		return payload_words
 	
@@ -797,7 +824,7 @@ class Neutrino:
 		raw_packet_size = len(raw_packet)
 		
 		if raw_packet_size > self.MAX_PACKET_SIZE:
-			raise Neutrino.NetworkError.InvalidPacket('Size of this packet ({0} bytes) exceeds maximum size of {1} bytes.'.format(raw_packet_size, self.MAX_PACKET_SIZE))
+			raise ex.NetworkError.InvalidPacket('Size of this packet ({0} bytes) exceeds maximum size of {1} bytes.'.format(raw_packet_size, self.MAX_PACKET_SIZE))
 		
 		# Decode and validate only unprotected header parts and validate total header size
 		(packet_type, session_id) = self._decode_and_validate_unprotected_packet_header(raw_packet)
@@ -824,8 +851,8 @@ class Neutrino:
 			# Encrypted encoded packet => Decrypted encoded packet
 			try:
 				raw_packet = self._decrypt_encoded_packet(raw_key=raw_key, raw_packet=raw_packet)
-			except Neutrino.LocalCryptoError.DecryptionFailed:
-				raise Neutrino.LocalCryptoError.DecryptionFailed('Failed to decrypt packet of client <client_id:session_id> <{0:1}.'.format(self._get_default_int_repr(client_id), self._get_default_int_repr(session_id)))
+			except ex.CryptoError.DecryptionFailed:
+				raise ex.CryptoError.DecryptionFailed('Failed to decrypt packet of client <packet_type:client_id:session_id> <{0}:{1}:{2}>.'.format(self._get_default_int_repr(packet_type), self._get_default_int_repr(client_id), self._get_default_int_repr(session_id)))
 				
 			# Update current host and port of the client
 			self._update_client_addr(client_id, client_ip, client_port)
@@ -837,7 +864,7 @@ class Neutrino:
 		try:
 			client_id = self._get_client_id_by_addr(client_ip, client_port)
 		# Add client
-		except Neutrino.ClientError.NotFoundError:
+		except ex.ServerSideError.ClientNotFound:
 			client_id = self._register_client(client_ip, client_port)
 		
 		# Trigger event
@@ -853,8 +880,11 @@ class Neutrino:
 		# Only, if session id must be given
 		if self._is_not_pending_client_session_id(session_id):
 			# Encrypted encoded packet => Decrypted encoded packet
-			raw_packet = self._decrypt_encoded_packet(raw_key=self.client_read_key, raw_packet=raw_packet)
-		
+			try:
+				raw_packet = self._decrypt_encoded_packet(raw_key=self.client_read_key, raw_packet=raw_packet)
+			except ex.CryptoError.DecryptionFailed:
+				raise ex.CryptoError.DecryptionFailed('Failed to decrypt server packet <packet_type:session_id> <{0}:{1}>.'.format(self._get_default_int_repr(packet_type), self._get_default_int_repr(session_id)))
+				
 		# Decode and validate the part of the decrypted protected header, then, decode and validate payload
 		(packet_number, packet_keyword, payload_words) = self._decode_and_validate_decrypted_packet_header_and_payload(raw_packet)
 		
@@ -867,14 +897,15 @@ class Neutrino:
 	def _get_next_packet_from_any_client(self) -> tuple:
 		try:
 			return self._servers_read()
-		except (Neutrino.ClientError.NotFoundError, Neutrino.ClientError.SessionError, Neutrino.RemoteCryptoError, Neutrino.NetworkError.InvalidPacket) as message:
+		except ex.NeutrinoException as message:
 			raise Neutrino.Instruction.DropThisPacket(message)
 			
 	# Receives the next packet from the server
 	def _get_next_packet_from_the_server(self) -> tuple:
 		try:
 			return self._clients_read()
-		except (Neutrino.RemoteCryptoError, Neutrino.NetworkError.InvalidPacket) as message:
+		#except (Neutrino.CryptoError, Neutrino.NetworkError.InvalidPacket) as message:
+		except ex.NeutrinoException as message:
 			raise Neutrino.Instruction.DropThisPacket(message)
 	
 	"""
@@ -899,7 +930,7 @@ class Neutrino:
 	def _send_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, packet_keyword: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> tuple:
 		# Ensure client_id is given if endpoint is the server
 		if self.is_server() is True and client_id is None:
-			raise Neutrino.LogicError("'client_id' cannot be None if packet is sent to a client.")
+			raise ex.LogicError("'client_id' cannot be None if packet is sent to a client.")
 			
 		# Get ip and port of client
 		if client_id is not None:
@@ -911,8 +942,8 @@ class Neutrino:
 		# As long it is not the initial client's HELLO packet
 		if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO1]:
 			# Cannot encrypt packets if no valid session id is given
-			if session_id is self.CLIENT_SESSION_ID_PENDING:
-				raise Neutrino.LogicError("Cannot encrypt packet if no valid session id is given.")
+			if session_id is self.SESSION_ID_PENDING:
+				raise ex.LogicError("Cannot encrypt packet if no valid session id is given.")
 		
 			# Find out the secret encryption (write) key
 			raw_key = b''
@@ -952,6 +983,10 @@ class Neutrino:
 
 	# Send packet to the server
 	def _send_to_server(self, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
+		if self._is_draining() is True:
+			raise ex.ClientSideError.Draining('Cannot send packet to server: Client is draining.')
+		
+		# Default
 		packet_number = self.PACKET_NUMBER_PENDING
 		
 		# As long it is not the initial client's HELLO packet
@@ -970,9 +1005,9 @@ class Neutrino:
 		# Generate new client keypair for each connection attempt
 		self._reload_local_crypto_keys()
 	
-		# Send unprotected HELLO packet to server to prepare the encrypted connection.
-		# The initial HELLO packet must be padded out to prevent amplification attacks.
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.CLIENT_SESSION_ID_PENDING, payload_words=[self.get_local_public_key()], padding=self.MAX_PACKET_SIZE)
+		# Send unprotected PACKET_TYPE_CLIENT_HELLO1 to the server to prepare the encrypted connection.
+		# The initial packet must be padded out to prevent amplification attacks.
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.SESSION_ID_PENDING, payload_words=[self.get_local_public_key()], padding=self.MAX_PACKET_SIZE)
 		
 		# Trigger event
 		self.base_client_event_on_request_session()
@@ -987,20 +1022,116 @@ class Neutrino:
 	# Close connection to the server
 	def close_connection_to_server(self) -> None:
 		if self.is_connected_to_server() is False:
-			raise Neutrino.NetworkError.NotConnected('Client is not connected to server.')
+			raise ex.NetworkError.NotConnected('Client is not connected to server.')
 		
 		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
-		self._destroy_session()
+		self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_CLIENT_GOOD_BYE)
 	
 	# Get this client endpoints session id
 	def get_this_client_session_id(self) -> int:
 		return self.client_session_id
 	
 	# Destroy client session
-	def _destroy_session(self) -> None:
+	def _destroy_session(self, reason: int) -> None:
 		self.client_session_id = None
-		self.client_packet_number = None	
+		self.client_packet_number = None
+		
+		# Trigger event
+		self.base_client_event_on_session_destroyed(reason)
 	
+	# Draining means that the client is not any more writing to, but still reading
+	# from the socket to get any remaining packets after server shutdown.
+	def _is_draining(self) -> bool:
+		if self.client_draining_started > 0:
+			return True
+			
+		return False
+		
+	def _enable_draining(self) -> None:
+		self.client_draining_started = self._get_current_time_milliseconds()
+		
+	def _disable_draining(self) -> None:
+		self.client_draining_started = 0
+		
+	# Register packet from the server
+	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
+		# Client is connected to the server
+		if self.is_connected_to_server() is True:
+			# Ensure only packet types specific for established sessions are sent
+			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_SERVER_SHUTDOWN]:
+				raise ex.NetworkError.UnexpectedPacket('Received unexpected packet type {0} (packet number {1}) by server (connected).'.format(self._get_default_int_repr(packet_type), packet_number))
+			
+			# Server is not available any more due to shutdown.
+			#
+			# Once that happens, we have to stop sending any packets to the server,
+			# but we still have to make sure that we receive all packets which were
+			# sent so far to the client. Therefore, we don't want to immediately
+			# close the connection from our side (even if the server is already away).
+			if packet_type is self.PACKET_TYPE_SERVER_SHUTDOWN:
+				self._enable_draining()
+
+				# Will be different for the very last timeout which is guaranteed
+				# to expire. Happens after server announced shutdown and is to enable
+				# the client to receive pending packets from the cache which were
+				# sent before server shutdown.
+				self.client_local_session_expire_time = (self._get_current_time_milliseconds() + self.SESSION_TIMEOUT_ENDING)
+
+				# Trigger event
+				self.base_client_event_on_server_shutdown()
+				return
+				
+		# Needs to establish connection first
+		else:
+			# Ensure only packet types specific for unestablished sessions are sent
+			if packet_type not in [self.PACKET_TYPE_SERVER_HELLO2]:
+				raise ex.NetworkError.UnexpectedPacket('Received unexpected packet type {0} (packet number {1}) by server (not connected).'.format(self._get_default_int_repr(packet_type), packet_number))
+				
+			# Server confirms session establishment
+			if packet_type is self.PACKET_TYPE_SERVER_HELLO2:
+				# Store session id locally
+				self.client_session_id = session_id
+				
+				# Trigger event
+				self.base_client_event_on_session_establishing(self.client_session_id)
+				
+				# Send out final handshake packet to explicitly confirm the session establishment
+				self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO3, session_id=self.client_session_id)
+	
+		# Update precalculated time when the session ends
+		session_timeout = self.SESSION_TIMEOUT_PENDING
+
+		# Will be higher for established sessions
+		if self.is_connected_to_server():
+			session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
+		
+		# Do not update this value any more if draining
+		if not self._is_draining():
+			# Precalculate time when the session ends
+			self.client_local_session_expire_time = (self._get_current_time_milliseconds() + session_timeout)
+	
+	"""
+	SERVER
+	"""
+	# Generate random client id for local use (64 bit)
+	def _generate_random_local_client_id(self) -> int:
+		random_client_id = self._get_random_int(0, self.MAX_LOCAL_CLIENT_ID_SIZE)
+		
+		# This is indeed very unlikely, but just to be sure
+		while random_client_id in self.client_sessions:
+			return self._generate_random_local_client_id()
+			
+		return random_client_id
+		
+	# Generate random session id (64 bit)
+	def _generate_random_session_id_for_client(self) -> int:
+		random_session_id = self._get_random_int(self.MIN_SESSION_ID_SIZE, self.MAX_SESSION_ID_SIZE)
+		
+		# This is indeed very unlikely, but just to be sure
+		while random_session_id in self.client_session_ids:
+			return self._generate_random_session_id_for_client()
+			
+		return random_session_id
+		
 	# Pass through all clients and delete all information about clients which timed out
 	def _check_for_timed_out_clients(self) -> None:
 		for client_id in list(self.client_sessions):
@@ -1059,52 +1190,52 @@ class Neutrino:
 		try:
 			return self.client_client_ids[client_ip][client_port]
 		except KeyError:
-			raise Neutrino.ClientError.NotFoundError('No client identified by <ip:port> (<{0}:{1}>) found.'.format(client_ip, client_port)) from None
+			raise ex.ServerSideError.ClientNotFound('No client identified by <ip:port> (<{0}:{1}>) found.'.format(client_ip, client_port)) from None
 	
 	# Get client addr by given client id
 	def _get_client_addr_by_client_id(self, client_id: int) -> tuple:
 		try:
 			return (self.client_sessions[client_id]['ip'], self.client_sessions[client_id]['port'])
 		except KeyError:
-			raise Neutrino.ClientError.NotFoundError('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
+			raise ex.ServerSideError.ClientNotFound('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
 	
 	# Get client id by session id
 	def _get_client_id_by_session_id(self, session_id: int) -> int:
 		try:
 			return self.client_session_ids[session_id]
 		except KeyError:
-			raise Neutrino.ClientError.NotFoundError('No client identified by <session_id> (<{0}>) found.'.format(self._get_default_int_repr(session_id))) from None	
+			raise ex.ServerSideError.ClientNotFound('No client identified by <session_id> (<{0}>) found.'.format(self._get_default_int_repr(session_id))) from None	
 	
 	# Get client's session secret encryption read/write key by client id
 	def _get_client_session_read_key_by_client_id(self, client_id: int) -> bytes:
 		try:
 			return self.client_sessions[client_id]['read_key']
 		except KeyError:
-			raise Neutrino.ClientError.NotFoundError('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
+			raise ex.ServerSideError.ClientNotFound('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
 	
 	def _get_client_session_write_key_by_client_id(self, client_id: int) -> bytes:
 		try:
 			return self.client_sessions[client_id]['write_key']
 		except KeyError:
-			raise Neutrino.ClientError.NotFoundError('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
+			raise ex.ServerSideError.ClientNotFound('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
 	
 	# Add new client id using the given addr pair
 	def _add_client_id_by_addr(self, client_ip: str, client_port: int) -> int:
 		# Limit of total connections
 		if (len(self.client_client_ids) + 1) > self.MAX_CONNECTIONS_TOTAL:
-			raise Neutrino.LimitExceededError('Adding new client would exceed total connections limit of {0}.'.format(self.MAX_CONNECTIONS_TOTAL))
+			raise ex.LimitExceededError('Adding new client would exceed total connections limit of {0}.'.format(self.MAX_CONNECTIONS_TOTAL))
 		
 		if client_ip in self.client_client_ids:
 			# Limit of connections per client
 			if (len(self.client_client_ids[client_ip]) + 1) > self.MAX_CONNECTIONS_CLIENT:
-				raise Neutrino.LimitExceededError('Adding new client would exceed connections per client limit of {0}.'.format(self.MAX_CONNECTIONS_CLIENT))
+				raise ex.LimitExceededError('Adding new client would exceed connections per client limit of {0}.'.format(self.MAX_CONNECTIONS_CLIENT))
 		else:
 			self.client_client_ids[client_ip] = {}
 		
 		# Cannot have two connections from the same client at the same port.
 		# NOTE: This may happen if _get_client_id_by_addr() was not called before.
 		if client_port in self.client_client_ids[client_ip]:
-			raise Neutrino.LogicError('Cannot initialize a client twice with the same <ip:port> pair.')
+			raise ex.LogicError('Cannot initialize a client twice with the same <ip:port> pair.')
 		else:
 			self.client_client_ids[client_ip][client_port] = self._generate_random_local_client_id()
 
@@ -1144,7 +1275,7 @@ class Neutrino:
 			
 		return packet_number
 	
-	# Get (and optionally increment) the clients sending packet number
+	# Get (and optionally increment) the local clients sending packet number
 	def _get_clients_packet_number(self, increment: bool=False):
 		# Generate initial random packet number which is used
 		# for packets sent to the server
@@ -1158,88 +1289,6 @@ class Neutrino:
 			
 		return packet_number
 		
-	# Generate random client id for local use (64 bit)
-	def _generate_random_local_client_id(self) -> int:
-		random_client_id = self._get_random_int(0, self.MAX_LOCAL_CLIENT_ID_SIZE)
-		
-		# This is indeed very unlikely, but just to be sure
-		while random_client_id in self.client_sessions:
-			return self._generate_random_local_client_id()
-			
-		return random_client_id
-		
-	# Generate random session id (64 bit)
-	def _generate_random_client_session_id(self) -> int:
-		random_session_id = self._get_random_int(self.MIN_SESSION_ID_SIZE, self.MAX_SESSION_ID_SIZE)
-		
-		# This is indeed very unlikely, but just to be sure
-		while random_session_id in self.client_session_ids:
-			return self._generate_random_client_session_id()
-			
-		return random_session_id
-	
-	# Validate session id
-	def _is_valid_client_session_id(self, session_id: int) -> bool:
-		if session_id in [self.CLIENT_SESSION_ID_PENDING]:
-			return True
-			
-		if session_id < self.MIN_SESSION_ID_SIZE or session_id > self.MAX_SESSION_ID_SIZE:
-			return False
-			
-		return True
-	
-	# Same as _is_valid_client_session_id(), but fail for pending sessions
-	def _is_not_pending_client_session_id(self, session_id: int) -> bool:
-		if self._is_valid_client_session_id(session_id):
-			if session_id in [self.CLIENT_SESSION_ID_PENDING]:
-				return False
-				
-			return True
-			
-		return False
-		
-	# Register packet from the server
-	def _register_server_packet(self, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
-		# Client is connected to the server
-		if self.is_connected_to_server() is True:
-			# Ensure only packet types specific for established sessions are sent
-			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_SERVER_SHUTDOWN]:
-				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by server (connected).'.format(self._get_default_int_repr(packet_type)))
-			
-			# Server is not available any more due to shutdown
-			if packet_type is self.PACKET_TYPE_SERVER_SHUTDOWN:
-				pass
-				
-		# Needs to establish connection first
-		else:
-			# Ensure only packet types specific for unestablished sessions are sent
-			if packet_type not in [self.PACKET_TYPE_SERVER_HELLO2]:
-				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by server (not connected).'.format(self._get_default_int_repr(packet_type)))
-				
-			# Server confirms session establishment
-			if packet_type is self.PACKET_TYPE_SERVER_HELLO2:
-				# Store session id locally
-				self.client_session_id = session_id
-				
-				# Trigger event
-				self.base_client_event_on_session_establishing(self.client_session_id)
-				
-				# Send out final handshake packet to explicitly confirm the session establishment
-				self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO3, session_id=self.client_session_id)
-	
-		# Update precalculated time when the session ends
-		session_timeout = self.SESSION_TIMEOUT_PENDING
-
-		# Will be higher for established sessions
-		if self.is_connected_to_server():
-			session_timeout = self.SESSION_TIMEOUT_ESTABLISHED
-		
-		# Precalculate time when the session ends
-		self.client_local_session_expire_time = (self._get_current_time_milliseconds() + session_timeout)
-	
-	"""
-	SERVER
-	"""	
 	# Register packet from any client
 	def _register_client_packet(self, client_id: int, session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		session_state = self.client_sessions[client_id]['session_state']
@@ -1249,15 +1298,15 @@ class Neutrino:
 		if session_state is self.INTERNAL_SESSION_STATE_NONE:
 			# Drop any unexpected packets
 			if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO1]:
-				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by unconnected client.'.format(self._get_default_int_repr(packet_type)))
+				raise ex.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by unconnected client.'.format(self._get_default_int_repr(packet_type)))
 			else:
 				# Client cannot have a session id yet
-				if session_id is not self.CLIENT_SESSION_ID_PENDING:
-					raise Neutrino.ClientError.SessionError('Unconnected client cannot have a session id yet.')
+				if session_id is not self.SESSION_ID_PENDING:
+					raise ex.ServerSideError.SessionError('Unconnected client cannot have a session id yet.')
 					
 				# Client cannot have a packet number yet
 				if packet_number is not self.PACKET_NUMBER_PENDING:
-					raise Neutrino.ClientError.SessionError('Unconnected client cannot have a packet number yet.')
+					raise ex.ServerSideError.SessionError('Unconnected client cannot have a packet number yet.')
 					
 				# Client initializes connection by sending its public key
 				if packet_type is self.PACKET_TYPE_CLIENT_HELLO1:
@@ -1266,17 +1315,17 @@ class Neutrino:
 					packet_size = len(raw_packet)
 					
 					if packet_size < self.MAX_PACKET_SIZE:
-						raise Neutrino.NetworkError.InvalidPacket('Client\'s hello packet size of {0} bytes is too small, expected {1} bytes.'.format(packet_size, self.MAX_PACKET_SIZE))
+						raise ex.NetworkError.InvalidPacket('Client\'s hello packet size of {0} bytes is too small, expected {1} bytes.'.format(packet_size, self.MAX_PACKET_SIZE))
 				
 					# Packet has exactly 1 word; extract client's public key
 					try:
 						(client_public_key,) = self._expect_n_words(payload_words, exactly=1)
-					except Neutrino.UnexpectedAmountOfWords:
-						raise Neutrino.NetworkError.InvalidPacket('Malformed PACKET_TYPE_CLIENT_HELLO1: Expected exactly one (1) word in payload.') from None
+					except ex.UnexpectedAmountOfWords:
+						raise ex.NetworkError.InvalidPacket('Malformed PACKET_TYPE_CLIENT_HELLO1: Expected exactly one (1) word in payload.') from None
 					else:
 						# Validate client's public key
 						if len(client_public_key) is not self.PUBLIC_KEY_LENGTH:
-							raise Neutrino.RemoteCryptoError.InvalidPublicKey('Length of client\'s public key is expected to be exactly {0} bytes.'.format(self.PUBLIC_KEY_LENGTH))		
+							raise ex.CryptoError.InvalidPublicKey('Length of client\'s public key is expected to be exactly {0} bytes.'.format(self.PUBLIC_KEY_LENGTH))		
 						
 						# Trigger event
 						(client_ip, client_port) = remote_addr_pair
@@ -1289,7 +1338,7 @@ class Neutrino:
 							(self.client_sessions[client_id]['read_key'], self.client_sessions[client_id]['write_key']) = self._derive_server_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, client_public_key)
 							
 							# Generate random session id and change session state
-							self.client_sessions[client_id]['session_id'] = session_id = self._generate_random_client_session_id()
+							self.client_sessions[client_id]['session_id'] = session_id = self._generate_random_session_id_for_client()
 							self.client_sessions[client_id]['session_state'] = self.INTERNAL_SESSION_STATE_PENDING
 							
 							# Generate random initial packet number
@@ -1306,7 +1355,7 @@ class Neutrino:
 		elif session_state is self.INTERNAL_SESSION_STATE_PENDING:
 			# Drop any unexpected packets
 			if packet_type not in [self.PACKET_TYPE_CLIENT_HELLO3]:
-				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_default_int_repr(packet_type)))
+				raise ex.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_default_int_repr(packet_type)))
 			else:
 				# Confirm session establishment
 				if packet_type is self.PACKET_TYPE_CLIENT_HELLO3:
@@ -1320,7 +1369,7 @@ class Neutrino:
 		elif session_state is self.INTERNAL_SESSION_STATE_ESTABLISHED:
 			# Drop any unexpected packets
 			if packet_type not in [self.PACKET_TYPE_KEEP_ALIVE, self.PACKET_TYPE_DATA, self.PACKET_TYPE_CLIENT_GOOD_BYE]:
-				raise Neutrino.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_default_int_repr(packet_type)))
+				raise ex.NetworkError.UnexpectedPacket('Received unexpected packet type {0} by connected client.'.format(self._get_default_int_repr(packet_type)))
 			else:
 				# Respond to KEEP_ALIVE packet with KEEP_ALIVE packet
 				if packet_type is self.PACKET_TYPE_KEEP_ALIVE:
@@ -1344,8 +1393,38 @@ class Neutrino:
 	"""
 	SERVER / CLIENTS
 	"""
+	# Validate session id
+	def _is_valid_client_session_id(self, session_id: int) -> bool:
+		if session_id in [self.SESSION_ID_PENDING]:
+			return True
+			
+		if session_id < self.MIN_SESSION_ID_SIZE or session_id > self.MAX_SESSION_ID_SIZE:
+			return False
+			
+		return True
+	
+	# Same as _is_valid_client_session_id(), but fails for pending sessions
+	def _is_not_pending_client_session_id(self, session_id: int) -> bool:
+		if self._is_valid_client_session_id(session_id):
+			if session_id in [self.SESSION_ID_PENDING]:
+				return False
+				
+			return True
+			
+		return False
+	
+	# Find out if endpoint socket is opened
+	def is_endpoint_active(self):
+		if self.endpoint:
+			return True
+			
+		return False
+		
 	# Close endpoint
 	def shutdown(self):
+		if not self.is_endpoint_active():
+			raise ex.NetworkError.NoOpenSocket('No DRGAM (UDP) socket opened.')
+			
 		# Tell all connected clients that server is shutting down
 		if self.is_server() is True:
 			self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_SERVER_SHUTDOWN)
@@ -1354,14 +1433,22 @@ class Neutrino:
 			if self.is_connected_to_server():
 				self.close_connection_to_server()
 		
-		# Undefine endpoint
+		# Trigger event
+		if self.is_server() is True:
+			self.base_server_event_on_shutdown()
+		
+		# Close socket
 		self.endpoint.close()
 		del self.endpoint
 	
 	# Send PACKET_TYPE_KEEP_ALIVE to server/client
 	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], payload_words: list=[]) -> None:
 		if self.is_client() is True:
-			self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
+			# Ignore if draining
+			try:
+				self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
+			except ex.ClientSideError.Draining:
+				pass
 		elif self.is_server() is True:
 			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, payload_words=payload_words)
 	
@@ -1390,7 +1477,7 @@ class Neutrino:
 	# not equal to the expected
 	def _expect_n_words(self, words: list, exactly: int) -> list:
 		if len(words) is not exactly:
-			raise Neutrino.UnexpectedAmountOfWords
+			raise ex.UnexpectedAmountOfWords
 			
 		return words
 		
@@ -1407,12 +1494,30 @@ class Neutrino:
 	def _get_random_bytes(self, number_of_bytes: int) -> bytes:
 		return nacl.utils.random(number_of_bytes)
 		
-	# Default representation of integers (used for logging purposes)
+	# Default representation of integers
 	def _get_default_int_repr(self, number: int) -> str:
 		if number is None:
 			return 'None'
 			
 		return hex(number)
+		
+	# Default representation of session ids
+	def _get_session_id_repr(self, number: int) -> str:
+		if number is self.SESSION_ID_PENDING:
+			return 'PENDING ({0})'.format(number)
+		
+		return self._get_default_int_repr(number)
+		
+	# Default representation of client ids
+	def _get_client_id_repr(self, number: int) -> str:
+		return self._get_default_int_repr(number)
+		
+	# Default representation of packet numbers
+	def _get_packet_number_repr(self, number: int) -> str:
+		if number is self.PACKET_NUMBER_PENDING:
+			return 'PENDING ({0})'.format(number)
+		
+		return number
 		
 	# Get current milliseconds timestamp
 	def _get_current_time_milliseconds(self) -> int:
@@ -1421,12 +1526,19 @@ class Neutrino:
 	"""
 	DEBUG (Used for debugging purposes)
 	"""
-	# Get unregister reason name (e.g. "Timeout" for CLIENT_UNREGISTER_REASON_TIMEOUT) by number
-	def get_unregister_reason_name_by_number(self, reason: int, prefix: str='CLIENT_UNREGISTER_REASON_') -> str:
+	# Get unregister reason name (e.g. "TIMEOUT" for CLIENT_UNREGISTER_REASON_TIMEOUT) by number
+	def get_client_unregister_reason_name_by_number(self, reason: int, prefix: str='CLIENT_UNREGISTER_REASON_') -> str:
 		try:
 			return prefix + self.CLIENT_UNREGISTER_REASON_NAMES[reason]
 		except KeyError:
 			return 'UNKNOWN_CLIENT_UNREGISTER_REASON'
+			
+	# Get session destruction reason name (e.g. "TIMEOUT" for CLIENT_SESSION_DESTROY_REASON_TIMEOUT) by number
+	def get_client_session_destroy_reason_name_by_number(self, reason: int, prefix: str='CLIENT_SESSION_DESTROY_') -> str:
+		try:
+			return prefix + self.CLIENT_SESSION_DESTROY_REASON_NAMES[reason]
+		except KeyError:
+			return 'UNKNOWN_CLIENT_SESSION_DESTROY_REASON'
 		
 	# Get packet type name (e.g. "CLIENT_HELLO1" for PACKET_TYPE_CLIENT_HELLO1)
 	def get_packet_name_by_type(self, packet_type: int, prefix: str='PACKET_') -> str:
@@ -1440,9 +1552,9 @@ class Neutrino:
 	
 	Just inherit this class to use events:
 	
-		> from Neutrino import Neutrino as NeutrinoSimple
-		> class Neutrino(NeutrinoSimple):
-		>   def event_*() -> ?:
+		> from Neutrino import Neutrino
+		> class Neutrino(Neutrino):
+		>   def base_[client|server]_event_*() -> ?:
 		>      pass
 	"""
 	# On every requested frame (after successfull reading or read timeout)
@@ -1491,6 +1603,10 @@ class Neutrino:
 	def base_server_event_on_client_addr_change(self, client_id: int, old_client_ip: str, old_client_port: int, new_client_ip: str, new_client_port: int) -> None:
 		return
 	
+	# Server sent PACKET_TYPE_SERVER_SHUTDOWN to all clients. At this stage, the endpoint is still active, but will be closed after execution of this event.
+	def base_server_event_on_shutdown(self) -> None:
+		return
+		
 	"""
 	Client-side events
 	"""
@@ -1502,56 +1618,17 @@ class Neutrino:
 	def base_client_event_on_session_establishing(self, session_id: int) -> None:
 		return
 	
+	# Server announced that he is about to shutdown immediately
+	def base_client_event_on_server_shutdown(self) -> None:
+		return
+	
+	# Session destroyed (see CLIENT_UNREGISTER_REASON_*)
+	def base_client_event_on_session_destroyed(self, reason: int) -> None:
+		return
+	
 	"""
-	EXCEPTIONS
+	INSTRUCTIONS
 	"""
-	class ConfigurationError(Exception):
-		__module__ = Exception.__module__
-		
-	class LogicError(Exception):
-		__module__ = Exception.__module__
-		
-	class WritingIsLocked(Exception):
-		__module__ = Exception.__module__
-		
-	class LimitExceededError(Exception):
-		__module__ = Exception.__module__
-		
-	class EncodingError(Exception):
-		__module__ = Exception.__module__		
-		
-	class UnexpectedAmountOfWords(Exception):
-		__module__ = Exception.__module__
-		
-	class ClientError(Exception):
-		class SessionError(Exception):
-			__module__ = Exception.__module__
-			
-		class NotFoundError(Exception):
-			__module__ = Exception.__module__
-	
-	class NetworkError(Exception):
-		class InvalidPacket(Exception):
-			__module__ = Exception.__module__
-			
-		class UnexpectedPacket(Exception):
-			__module__ = Exception.__module__
-			
-		class NotConnected(Exception):
-			__module__ = Exception.__module__
-	
-	class LocalCryptoError(Exception):
-		class DecryptionFailed(Exception):
-			__module__ = Exception.__module__
-			
-		class InvalidPublicOrSecretKey(Exception):
-			__module__ = Exception.__module__
-			
-	class RemoteCryptoError(Exception):
-		class InvalidPublicKey(Exception):
-			__module__ = Exception.__module__
-	
-	# Not an error or nothing which needs to be considered of
 	class Instruction(Exception):
 		# Packet which leads to an error (e.g. expired client sessions,
 		# malformed packets). Since the server is not able to fix any
