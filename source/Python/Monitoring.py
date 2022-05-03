@@ -33,9 +33,9 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 from typing import Optional
 
 """
-Visualizes the network traffic. Used for debugging/testing purposes.
+Monitors the network traffic. Used for debugging/testing purposes.
 """
-class VisualizeNeutrino:
+class Monitoring:
 
 	# Text and background colors
 	TEXT_COLOR = {
@@ -138,10 +138,10 @@ class VisualizeNeutrino:
 		
 		self.log(self.LOG_NAME_RECV, None, {
 			self.get_packet_name_by_type(packet_type): self._get_default_int_repr(packet_type),
-			'SID': self._get_default_int_repr(session_id),
+			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_default_int_repr(client_id),
 			'Size': raw_packet_size,
-			'Number': packet_number,
+			'Number': self._get_packet_number_repr(packet_number),
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
@@ -156,10 +156,10 @@ class VisualizeNeutrino:
 		
 		self.log(self.LOG_NAME_SEND, None, {
 			self.get_packet_name_by_type(packet_type): self._get_default_int_repr(packet_type),
-			'SID': self._get_default_int_repr(session_id),
+			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_default_int_repr(client_id),
 			'Size': raw_packet_size,
-			'Number': packet_number,
+			'Number': self._get_packet_number_repr(packet_number),
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
@@ -188,9 +188,23 @@ class VisualizeNeutrino:
 		super().base_client_event_on_session_establishing(session_id)
 
 		self.log(self.LOG_NAME_INIT, 'SESSION ESTABLISHING (2/3): Received session id from server.', {
-			'SID': self._get_default_int_repr(session_id)
+			'SID': self._get_session_id_repr(session_id)
 		})
 		return
+	
+	def base_client_event_on_session_destroyed(self, reason: int) -> None:
+		super().base_client_event_on_session_destroyed(reason)
+		
+		self.log(self.LOG_NAME_QUIT, 'Session destroyed.', {
+			'Reason': self.get_client_session_destroy_reason_name_by_number(reason, '')
+		})
+		return	
+	
+	def base_client_event_on_server_shutdown(self) -> None:
+		super().base_client_event_on_server_shutdown()
+		
+		self.log(self.LOG_NAME_QUIT, 'Server announced shutdown.', {})
+		return	
 	
 	"""
 	Server-side events
@@ -199,8 +213,8 @@ class VisualizeNeutrino:
 		super().base_server_event_on_session_request(client_id, session_id, client_ip, client_port)
 		
 		self.log(self.LOG_NAME_INIT, 'REQUEST SESSION (1/3): Client asked server to respond with an encrypted session id.', {
-			'CID': self._get_default_int_repr(client_id),
-			'SID': self._get_default_int_repr(session_id),
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
 		})
@@ -211,8 +225,8 @@ class VisualizeNeutrino:
 		super().base_server_event_on_session_established(client_id, session_id)
 		
 		self.log(self.LOG_NAME_INIT, 'SESSION ESTABLISHED (3/3): Client confirmed receipt of session id.', {
-			'CID': self._get_default_int_repr(client_id),
-			'SID': self._get_default_int_repr(session_id)
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id)
 		})
 		return
 		
@@ -220,10 +234,16 @@ class VisualizeNeutrino:
 		super().base_server_event_on_client_unregistered(reason, client_id, session_id, client_ip, client_port)
 		
 		self.log(self.LOG_NAME_QUIT, 'Client unregistered.', {
-			'Reason': self.get_unregister_reason_name_by_number(reason, ''),
-			'CID': self._get_default_int_repr(client_id),
-			'SID': self._get_default_int_repr(session_id),
+			'Reason': self.get_client_unregister_reason_name_by_number(reason, ''),
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
 		})
+		return
+		
+	def base_server_event_on_shutdown(self) -> None:
+		super().base_server_event_on_shutdown()
+		
+		self.log(self.LOG_NAME_QUIT, 'Server is shutting down.', {})
 		return
