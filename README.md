@@ -11,7 +11,7 @@ For better separation of concerns it comes in three different versions – the b
   The basic protocol. Packets<sup>1</sup> are always encrypted and must have a size of <= 1280 bytes.
   
 - **NeutrinoReliable**<br>
-  An extension which introduces detection of packet-loss and duplicates.
+  An extension which introduces detection and correction of packet loss and detection of duplicates or packets which are out of order.
   
 - **NeutrinoExtended**<br>
   Relies on NeutrinoReliable and raises the packet size limit.
