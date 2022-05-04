@@ -145,11 +145,11 @@ class NeutrinoReliable(Neutrino):
 			del self.buffer_outgoing[client_id]
 	
 	# Hook into Neutrino::base_event_on_register_any_packet() to handle PACKET_TYPE_REQUEST_RETRANSMISSION and PACKET_TYPE_KEEP_ALIVE
-	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> bool:		
+	def base_event_on_register_any_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> bool:		
 		super().base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
 		# Only if session is established
-		if (self.is_server() is True and self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED) or (self.is_client() is True and self.connected_to_server() is True):
+		if (self.is_server() is True and self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED) or (self.is_client() is True and self.is_connected_to_server() is True):
 			# The actual client id or None for the server (converted to -1)
 			endpoint_id = client_id or -1
 			
@@ -228,7 +228,7 @@ class NeutrinoReliable(Neutrino):
 					
 					# Calculate average RTT
 					self.statistics['average_round_trip_time'] = round(self.average_round_trip_time_recording_sum / len(self.average_round_trip_time_recording_list))
-					
+				
 				# Block further processing of this packet in Neutrino::base_event_on_register_any_packet()
 				return False
 			
@@ -236,7 +236,7 @@ class NeutrinoReliable(Neutrino):
 		return True
 	
 	# Record any incoming packets to spot any loss and distribute these packets later in a reliable way
-	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, received_packet_number: int, received_packet_keyword: int, payload_words: tuple) -> None:
+	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, received_packet_number: int, received_packet_keyword: int, payload_words: list) -> None:
 		super().base_event_on_packet_received(client_id, session_id, remote_addr_pair, raw_packet, packet_type, received_packet_number, received_packet_keyword, payload_words)
 
 		# The actual client id or None for the server (converted to -1)
@@ -387,8 +387,8 @@ class NeutrinoReliable(Neutrino):
 			)
 	
 	# On every requested frame (after successfull reading or read timeout)
-	def base_event_on_requested_frame(self, frame_number: int) -> None:
-		super().base_event_on_requested_frame(frame_number)
+	def base_event_on_requested_frame(self, frame_number: int, milliseconds_between_frames: int) -> None:
+		super().base_event_on_requested_frame(frame_number, milliseconds_between_frames)
 		
 		# Pass through all endpoints
 		for endpoint_id in self.buffer_incoming:
@@ -520,7 +520,7 @@ class NeutrinoReliable(Neutrino):
 	# Unlike Neutrino::base_event_on_packet_received(), this event guarantees that
 	#	- packets are received in order (loss check),
 	#	- packets are never distributed more than once (duplicate check).
-	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
+	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		return
 		
 	# Opposite endpoint requests retransmission of a packet
