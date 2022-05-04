@@ -181,7 +181,7 @@ class Neutrino:
 	# Time in milliseconds after a session is destroyed when there are no packets received
 	SESSION_TIMEOUT_PENDING: int = 250
 	SESSION_TIMEOUT_ESTABLISHED: int = 1500
-	SESSION_TIMEOUT_ENDING: int = 3000
+	SESSION_TIMEOUT_ENDING: int = 2000
 	
 	# Time in milliseconds after a KEEP_ALIVE packet is sent if there is no communication between
 	# the endpoints observed. This functionality is mandatory for the loss detection used
@@ -248,6 +248,14 @@ class Neutrino:
 		CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN: 'SERVER_SHUTDOWN',
 		CLIENT_SESSION_DESTROY_REASON_PROTOCOL_VIOLATION: 'PROTOCOL_VIOLATION'
 	}
+	
+	"""
+	CONSTANTS: EXAMPLE SERVER KEYPAIR
+	"""
+	# We store the server keypair (public + secret key) from the examples here
+	# to make sure they are not accidentially used in a productive environment.
+	EXAMPLE_SERVER_PUBLIC_KEY_HEX = 'a923e0968a713987d76eba139c434ec3d85d7903f7605b02dcbf09996a6b535d'
+	EXAMPLE_SERVER_SECRET_KEY_HEX = '59a13dd4ed21a0e87432094c3677ae9e34a0f5c1f19686280b54421b603a2bed'
 	
 	"""
 	VARIABLES: CRYPTO
@@ -325,6 +333,9 @@ class Neutrino:
 	VARIABLES: OTHER
 	"""
 	frame_number: int = 0
+	frame_time: int = 0
+	
+	milliseconds_between_frames: Optional[int] = None
 
 	"""
 	INITIALIZATION
@@ -379,7 +390,11 @@ class Neutrino:
 		if not self.is_endpoint_active():
 			raise ex.NetworkError.NoOpenSocket('No DRGAM (UDP) socket opened.')
 		
+		if self.frame_time > 0:
+			self.milliseconds_between_frames = (self._get_current_time_milliseconds() - self.frame_time)
+		
 		self.frame_number += 1
+		self.frame_time = self._get_current_time_milliseconds()
 		
 		"""
 		>>WRITE -> Does happen immediately, see self._write()
@@ -426,7 +441,7 @@ class Neutrino:
 			self._clients_tick()
 			
 		# Trigger event
-		self.base_event_on_requested_frame(self.frame_number)
+		self.base_event_on_requested_frame(self.frame_number, self.milliseconds_between_frames)
 		
 		return self.frame_number
 
@@ -482,6 +497,10 @@ class Neutrino:
 	def load_keys(self, local_public_key_hex: str, local_secret_key_hex: str, remote_public_key_hex: str=None) -> None:
 		self._load_local_keypair(local_public_key_hex, local_secret_key_hex)
 
+		# Warn against accidential use of the example keypair
+		if (local_public_key_hex == self.EXAMPLE_SERVER_PUBLIC_KEY_HEX) or (local_secret_key_hex == self.EXAMPLE_SERVER_SECRET_KEY_HEX) or (remote_public_key_hex == self.EXAMPLE_SERVER_PUBLIC_KEY_HEX):
+			self._print_error("You're using the servers public and/or secret key from the examples. Please generate a new one for your application, see generate_random_server_keypair_hex().")
+
 		if self.is_client() is True:
 			self._load_remote_public_key(remote_public_key_hex)
 			self._reload_local_crypto_keys()
@@ -504,6 +523,10 @@ class Neutrino:
 		if len(self.local_public_key) is not self.PUBLIC_KEY_LENGTH or len(self.local_secret_key) is not self.SECRET_KEY_LENGTH:
 			raise ex.CryptoError.InvalidPublicOrSecretKey('Length of public/secret key is expected to be exactly {0}/{1} bytes.'.format(self.PUBLIC_KEY_LENGTH, self.SECRET_KEY_LENGTH))
 	
+	# Return local public key
+	def _get_local_public_key(self):
+		return self.local_public_key	
+	
 	# Loads the public key of the remote endpoint (usually the servers one)
 	def _load_remote_public_key(self, remote_public_key_hex: str=None) -> None:	
 		# Clients need to load the public key of the server
@@ -522,10 +545,6 @@ class Neutrino:
 		
 		# Derive read/write encryption keys (secrets)
 		(self.client_read_key, self.client_write_key) = self._derive_client_encryption_keys_from_keypair(self.local_public_key, self.local_secret_key, self.remote_public_key)
-	
-	# Return local public key
-	def get_local_public_key(self):
-		return self.local_public_key
 	
 	"""
 	CRYPTO: ALIAS FUNCTIONS
@@ -877,6 +896,10 @@ class Neutrino:
 	def _clients_read(self) -> tuple:
 		(remote_addr_pair, raw_packet, packet_type, session_id) = self._read()
 		
+		# Early catch of errors
+		if not self.client_session_id and self._is_valid_client_session_id(session_id) and packet_type not in [self.PACKET_TYPE_SERVER_HELLO2]:
+			raise ex.NetworkError.UnexpectedPacket('Server packet <packet_type:session_id> <{0}:{1}> not expected at this stage. This can be caused by high network delays.'.format(self._get_default_int_repr(packet_type), self._get_default_int_repr(session_id)))
+			
 		# Only, if session id must be given
 		if self._is_not_pending_client_session_id(session_id):
 			# Encrypted encoded packet => Decrypted encoded packet
@@ -997,6 +1020,10 @@ class Neutrino:
 		# Send packet to server
 		return self._send_packet(None, session_id, (self.host, self.port), packet_type, packet_number, self.PACKET_KEYWORD_NONE, None, payload_words, padding)
 
+	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
+	def send_data_to_authenticated_clients(self, payload_words: list=[]) -> None:
+		return self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=payload_words)
+
 	"""
 	CLIENTS
 	"""
@@ -1007,7 +1034,7 @@ class Neutrino:
 	
 		# Send unprotected PACKET_TYPE_CLIENT_HELLO1 to the server to prepare the encrypted connection.
 		# The initial packet must be padded out to prevent amplification attacks.
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.SESSION_ID_PENDING, payload_words=[self.get_local_public_key()], padding=self.MAX_PACKET_SIZE)
+		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_HELLO1, session_id=self.SESSION_ID_PENDING, payload_words=[self._get_local_public_key()], padding=self.MAX_PACKET_SIZE)
 		
 		# Trigger event
 		self.base_client_event_on_request_session()
@@ -1024,7 +1051,10 @@ class Neutrino:
 		if self.is_connected_to_server() is False:
 			raise ex.NetworkError.NotConnected('Client is not connected to server.')
 		
-		self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
+		# Not if already draining
+		if not self._is_draining():
+			self._send_to_server(packet_type=self.PACKET_TYPE_CLIENT_GOOD_BYE, session_id=self.client_session_id)
+			
 		self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_CLIENT_GOOD_BYE)
 	
 	# Get this client endpoints session id
@@ -1444,11 +1474,9 @@ class Neutrino:
 	# Send PACKET_TYPE_KEEP_ALIVE to server/client
 	def _send_keep_alive_packet(self, client_id: Optional[int], session_id: Optional[int], payload_words: list=[]) -> None:
 		if self.is_client() is True:
-			# Ignore if draining
-			try:
+			# Not, if already draining
+			if not self._is_draining():
 				self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
-			except ex.ClientSideError.Draining:
-				pass
 		elif self.is_server() is True:
 			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, payload_words=payload_words)
 	
@@ -1464,8 +1492,13 @@ class Neutrino:
 					self._register_server_packet(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 	
 	"""
-	OTHER
+	OTHER: PUBLIC
 	"""
+	# Generates a random keypair (public and secret key) for the server for permanent storage
+	# on the server side (both public + secret key) and client side (servers public key only).
+	def generate_random_server_keypair_hex(self) -> tuple:
+		return self._generate_keypair_hex()
+		
 	# Find out if we are the server/client or not
 	def is_server(self) -> bool:
 		return self.server
@@ -1473,6 +1506,13 @@ class Neutrino:
 	def is_client(self) -> bool:
 		return (not self.is_server())
 		
+	"""
+	OTHER: INTERNAL
+	"""
+	# Prints colored error message to STDERR
+	def _print_error(self, message: str) -> None:
+		print('\033[91m{0}\033[0m'.format(message), file=sys.stderr)
+	
 	# Just throws an exception if amount of words is
 	# not equal to the expected
 	def _expect_n_words(self, words: list, exactly: int) -> list:
@@ -1494,6 +1534,13 @@ class Neutrino:
 	def _get_random_bytes(self, number_of_bytes: int) -> bytes:
 		return nacl.utils.random(number_of_bytes)
 		
+	# Get current milliseconds timestamp
+	def _get_current_time_milliseconds(self) -> int:
+		return int(str(time.time_ns())[:-6])
+	
+	"""
+	DEBUG/LOGGING (Used for debugging or logging purposes)
+	"""
 	# Default representation of integers
 	def _get_default_int_repr(self, number: int) -> str:
 		if number is None:
@@ -1519,13 +1566,6 @@ class Neutrino:
 		
 		return number
 		
-	# Get current milliseconds timestamp
-	def _get_current_time_milliseconds(self) -> int:
-		return int(str(time.time_ns())[:-6])
-	
-	"""
-	DEBUG (Used for debugging purposes)
-	"""
 	# Get unregister reason name (e.g. "TIMEOUT" for CLIENT_UNREGISTER_REASON_TIMEOUT) by number
 	def get_client_unregister_reason_name_by_number(self, reason: int, prefix: str='CLIENT_UNREGISTER_REASON_') -> str:
 		try:
@@ -1558,7 +1598,7 @@ class Neutrino:
 		>      pass
 	"""
 	# On every requested frame (after successfull reading or read timeout)
-	def base_event_on_requested_frame(self, frame_number: int) -> None:
+	def base_event_on_requested_frame(self, frame_number: int, milliseconds_between_frames: int) -> None:
 		return
 		
 	# Received any unencrypted packet
