@@ -69,7 +69,7 @@ class NetworkError(NeutrinoException):
 	class UnexpectedPacket(NeutrinoException):
 		__module__ = Exception.__module__
 		
-	class NotConnected(NeutrinoException):
+	class NoActiveSession(NeutrinoException):
 		__module__ = Exception.__module__
 		
 	class NoOpenSocket(NeutrinoException):
