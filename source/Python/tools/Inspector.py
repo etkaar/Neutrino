@@ -84,7 +84,7 @@ class Inspector:
 	def __init__(self):
 		self.neutrino = Neutrino()
 		
-	# Wait for packages in queue
+	# Wait for packets passed through the queue
 	def start_investigating(self) -> None:
 		nfqueue = NetfilterQueue()
 		nfqueue.bind(self.QUEUE_NUMBER, self.handle_packet)
@@ -117,12 +117,21 @@ class Inspector:
 		"""
 		Here the packet can be altered.
 		"""
-		# Invalidate session
+		# Malform header values
+		if False:
+			protocol_identifier += 1
+			
+		if False:
+			protocol_version += 1
+			
+		if False:
+			packet_type += 1
+			
 		if False:
 			session_id +=1
-			
+		
 		# Change length of the encrypted part
-		if False:
+		if True:
 			right_encrypted = right_encrypted[1:]
 		
 		# Rebuild the packet
@@ -136,7 +145,10 @@ class Inspector:
 		
 		# Trigger recalculation of the checksums
 		del ip_payload[IP].chksum
+		del ip_payload[IP].len
+		
 		del ip_payload[UDP].chksum
+		del ip_payload[UDP].len
 	
 		# Update IP payload
 		raw_ip_packet.set_payload(bytes(ip_payload))
@@ -144,7 +156,7 @@ class Inspector:
 		# Do not drop packet
 		raw_ip_packet.accept()
 
-
+# Do not execute if imported as module
 if __name__ == '__main__':
 	inspector = Inspector()
 	inspector.start_investigating()
