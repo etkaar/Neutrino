@@ -31,7 +31,11 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
 OR OTHER DEALINGS IN THE SOFTWARE.
 '''
 from Neutrino import Neutrino
+
 from typing import Optional
+
+import exceptions.ExceptionsBase as ExBase
+import exceptions.ExceptionsReliable as ExReliable
 
 """
 An extended Neutrino class to introduce some
@@ -44,7 +48,7 @@ class NeutrinoReliable(Neutrino):
 	CONSTANTS: COMMON
 	"""
 	# Add new packet type
-	PACKET_TYPE_REQUEST_RETRANSMISSION: int = 0x11
+	PACKET_TYPE_REQUEST_RETRANSMISSION: int = 0x21
 	
 	# Add packet type into packet types list
 	PACKET_TYPES: list = Neutrino.PACKET_TYPES + [PACKET_TYPE_REQUEST_RETRANSMISSION]
@@ -127,7 +131,7 @@ class NeutrinoReliable(Neutrino):
 	"""
 	EVENTS: Neutrino
 	"""
-	# Reset traffic buffers before connecting
+	# Reset traffic buffers before session establishment
 	def base_client_event_on_request_session(self) -> None:
 		super().base_client_event_on_request_session()
 		
@@ -149,7 +153,7 @@ class NeutrinoReliable(Neutrino):
 		super().base_event_on_register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
 		# Only if session is established
-		if (self.is_server() is True and self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED) or (self.is_client() is True and self.is_connected_to_server() is True):
+		if (self.is_server() is True and self.client_sessions[client_id]['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED) or (self.is_client() is True and self.is_session_to_server_established() is True):
 			# The actual client id or None for the server (converted to -1)
 			endpoint_id = client_id or -1
 			
@@ -158,8 +162,8 @@ class NeutrinoReliable(Neutrino):
 				# Packet has exactly 1 word; extract packet number desired to be retransmitted
 				try:
 					(requested_packet_number,) = self._expect_n_words(payload_words, exactly=1)
-				except Neutrino.UnexpectedAmountOfWords:
-					raise Neutrino.NetworkError.InvalidPacket('Malformed REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
+				except ExBase.UnexpectedAmountOfWords:
+					raise ExBase.NetworkError.InvalidPacket('Malformed REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
 			
 				# Convert bytes back to 64-bit integer
 				requested_packet_number = self._int64_from_bytes(requested_packet_number)
@@ -170,16 +174,23 @@ class NeutrinoReliable(Neutrino):
 					UNRECOVERABLE LOSS (OPPOSITE ENDPOINT) - Cannot fulfill request.
 					
 					Even if the session will timeout anyway because the opposite endpoint will give
-					up after a certain amount of time, we do already here close the connection.
+					up after a certain amount of time, we do already here close the session.
 					"""
-					raise NeutrinoReliable.NetworkError.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Cannot fulfill opposite endpoints retransmission request for packet number <{0}>.'.format(requested_packet_number))
+					raise ExReliable.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Cannot fulfill opposite endpoints retransmission request for packet number <{0}>.'.format(requested_packet_number))
 	
 				# Retransmit packet 1:1
-				(raw_packet,) = self.buffer_outgoing[endpoint_id]['packets'][requested_packet_number]
+				(raw_packet, retransmitted_packet_type) = self.buffer_outgoing[endpoint_id]['packets'][requested_packet_number]
 				self._write(remote_addr_pair, raw_packet)
 				
 				# Trigger event
-				self.reliable_event_on_packet_retransmission_requested(requested_packet_number)
+				self.reliable_event_on_packet_retransmitted(client_id, session_id, retransmitted_packet_type, requested_packet_number)
+				
+				# Manually update clients session expire time since Neutrino::_register_[client|server]_packet() – where that happens – is blocked.
+				if self.is_server() is True:
+					self._update_clients_session_expire_time(client_id)
+				# Do not forget to do that on client side
+				elif self.is_client() is True:
+					self._update_client_local_session_expire_time()
 				
 				# Block further processing of this packet in Neutrino::base_event_on_register_any_packet()
 				return False
@@ -190,8 +201,8 @@ class NeutrinoReliable(Neutrino):
 				# Packet has exactly 2 words; see self._send_keep_alive_packet()
 				try:
 					(time_sent_milliseconds, endpoints_latest_confirmed_packet_number) = self._expect_n_words(payload_words, exactly=2)
-				except Neutrino.UnexpectedAmountOfWords:
-					raise Neutrino.NetworkError.InvalidPacket('Malformed PACKET_TYPE_KEEP_ALIVE: Expected exactly two (2) words in payload.') from None
+				except ExBase.UnexpectedAmountOfWords:
+					raise ExBase.NetworkError.InvalidPacket('Malformed PACKET_TYPE_KEEP_ALIVE: Expected exactly two (2) words in payload.') from None
 				
 				# Convert bytes back to 64-bit integer
 				endpoints_latest_confirmed_packet_number = self._int64_from_bytes(endpoints_latest_confirmed_packet_number)
@@ -210,8 +221,17 @@ class NeutrinoReliable(Neutrino):
 				# leaves 'time_sent_milliseconds' as it is to allow the client a RTT measurement.
 				if self.is_server() is True:
 					self._send_keep_alive_packet(client_id=client_id, session_id=session_id, payload_words=[time_sent_milliseconds])
+					
+					# Manually update clients session expire time
+					self._update_clients_session_expire_time(client_id)
+					
+					# Block further processing of this packet in Neutrino::base_event_on_register_any_packet()
+					return False
 				# So, that was our KEEP_ALIVE packet we previously sent to the server
 				elif self.is_client() is True:
+					# Update local session expire time
+					self._update_client_local_session_expire_time()
+				
 					# Calculate Round Trip Time (RTT) from it. That is reliable, because packets are guaranteed
 					# to be in order. Hence, e.g. if the KEEP_ALIVE was lost and then be retransmitted, of course
 					# the RTT will increase; see also the explanation at EXPECTED_AVERAGE_ROUND_TRIP_TIME.
@@ -228,9 +248,6 @@ class NeutrinoReliable(Neutrino):
 					
 					# Calculate average RTT
 					self.statistics['average_round_trip_time'] = round(self.average_round_trip_time_recording_sum / len(self.average_round_trip_time_recording_list))
-				
-				# Block further processing of this packet in Neutrino::base_event_on_register_any_packet()
-				return False
 			
 		# Continue
 		return True
@@ -264,13 +281,13 @@ class NeutrinoReliable(Neutrino):
 		is given yet due to pending authentication, so this takes place once
 		the first time a packet is received containing a packet number.
 
-		(In case loss takes place during the authentication, the connection
+		(In case loss takes place during the authentication, the session
 		will timeout quickly, see Neutrino::SESSION_TIMEOUT_PENDING)
 		"""
 		if received_packet_number > self.PACKET_NUMBER_PENDING:
 			"""
-			This is the first time we receive a valid packet number within this session (connection)
-			and so we need to initiate 'latest_confirmed_packet_number' with it. However, we need to
+			This is the first time we receive a valid packet number within this session and
+			so we need to initiate 'latest_confirmed_packet_number' with it. However, we need to
 			make sure that this packet number comes from a hello packet (PACKET_TYPE_*_HELLO),
 			otherwise non-recoverable loss has taken place within the authentication process.
 			"""
@@ -279,8 +296,7 @@ class NeutrinoReliable(Neutrino):
 				UNRECOVERABLE LOSS
 				"""
 				if packet_type not in [self.PACKET_TYPE_SERVER_HELLO2, self.PACKET_TYPE_CLIENT_HELLO3]:
-					print("HERE ERROR", packet_type)
-					raise NeutrinoReliable.NetworkError.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Received unexpected packet type {0}. Either loss happened or packets were out of order during authentication.'.format(self._get_default_int_repr(packet_type)))
+					raise ExReliable.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Received unexpected packet type {0}. Either loss happened or packets were out of order during authentication.'.format(self._get_default_int_repr(packet_type)))
 				
 				# Initiate with very first received packet number
 				self.buffer_incoming[endpoint_id]['latest_confirmed_packet_number'] = received_packet_number
@@ -358,16 +374,22 @@ class NeutrinoReliable(Neutrino):
 								a retransmission something went very wrong.
 								"""
 								if self.requested_retransmission[endpoint_id][missing_packet_number]['count'] > self.MAX_RETRANSMISSION_REQUESTS_PER_PACKET:
-									raise NeutrinoReliable.NetworkError.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Giving up on packet number {0}: Maximum amount of retransmission requests exceeded (see MAX_RETRANSMISSION_REQUESTS_PER_PACKET).'.format(missing_packet_number))
+									raise ExReliable.UnrecoverableLoss(client_id=client_id, session_id=session_id, message='Giving up on packet number {0}: Maximum amount of retransmission requests exceeded (see MAX_RETRANSMISSION_REQUESTS_PER_PACKET).'.format(missing_packet_number))
 						
 						# Request retransmission for all still missing packets
 						if len(packet_numbers_for_retransmission) > 0:
 							self._request_retransmission(client_id, session_id, remote_addr_pair, packet_numbers_for_retransmission)
+							
+							# Trigger event
+							self.reliable_event_on_packet_retransmission_requested(client_id, session_id, packet_numbers_for_retransmission)
 				
 				# OUTDATED DUPLICATE: This packet number is too small, therefore we assume it was already received before
 				elif received_packet_number < expected_packet_number:
 					# Statistics
 					self.statistics['dropped_duplicate_packets'] += 1
+				
+					# Trigger event
+					self.reliable_event_on_duplicate_packet_detected(client_id, session_id, packet_type, received_packet_number, expected_packet_number)
 				
 					# Abort, otherwise it is added to the buffer
 					return
@@ -376,6 +398,9 @@ class NeutrinoReliable(Neutrino):
 			if received_packet_number in self.buffer_incoming[endpoint_id]['packets']:
 				# Statistics
 				self.statistics['dropped_duplicate_packets'] += 1
+				
+				# Trigger event
+				self.reliable_event_on_duplicate_packet_detected(client_id, session_id, packet_type, received_packet_number, None)
 				
 				# Abort, otherwise it is added to the buffer
 				return
@@ -439,7 +464,7 @@ class NeutrinoReliable(Neutrino):
 		# Do only store packets which already have a packet number
 		if packet_number > self.PACKET_NUMBER_PENDING:
 			self.buffer_outgoing[endpoint_id]['packets'].update(
-				{packet_number: (raw_packet,)}
+				{packet_number: (raw_packet, packet_type)}
 			)
 			
 		return
@@ -472,16 +497,16 @@ class NeutrinoReliable(Neutrino):
 	
 	# Only overridden for debugging purposes
 	def _write(self, remote_addr_pair: tuple, raw_packet: bytes) -> int:
-		if self.is_server() is True:
-			# Supress outgoing packets with a probability of 5% to provoke loss detection
-			if self.induce_fake_loss is True:
-				if self._get_random_int(1, 20) == 1:
-					return 0
-					
-			# Double-spend (send twice) packets with a probability of 5%
-			if self.induce_double_spends is True:
-				if self._get_random_int(1, 20) == 1:
-					return super()._write(remote_addr_pair, raw_packet)
+		# Supress outgoing packets with a probability of n% to provoke loss detection
+		if self.induce_fake_loss is True:
+			if self._get_random_int(1, 20) == 1:
+				return 0
+				
+		# Double-spend (send twice) packets with a probability of n%
+		if self.induce_double_spends is True:
+			if self._get_random_int(1, 20) == 1:
+				# Self-invoking (self instead of super()) causes an additional probability of multiple duplicates
+				self._write(remote_addr_pair, raw_packet)
 			
 		return super()._write(remote_addr_pair, raw_packet)
 	
@@ -522,17 +547,15 @@ class NeutrinoReliable(Neutrino):
 	#	- packets are never distributed more than once (duplicate check).
 	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		return
-		
-	# Opposite endpoint requests retransmission of a packet
-	def reliable_event_on_packet_retransmission_requested(self, requested_packet_number: int) -> None:
+	
+	# Retransmission of a packet was requested
+	def reliable_event_on_packet_retransmission_requested(self, client_id: Optional[int], session_id: int, packet_numbers_for_retransmission: list) -> None:
 		return
 		
-	"""
-	EXCEPTIONS
-	"""
-	class NetworkError(Exception):
-		class UnrecoverableLoss(Exception):
-			def __init__(self, message: str, client_id: Optional[int], session_id: int):
-				self.message = message
-				self.client_id = client_id
-				self.session_id = session_id
+	# Packet was retransmitted due to retransmission request from opposite.
+	def reliable_event_on_packet_retransmitted(self, client_id: Optional[int], session_id: int, retransmitted_packet_type: int, retransmitted_packet_number: int) -> None:
+		return
+		
+	# Once a duplicate packet was detected (informational event)
+	def reliable_event_on_duplicate_packet_detected(self, client_id: Optional[int], session_id: int, received_packet_type: int, received_packet_number: int, expected_packet_number: Optional[int]) -> None:
+		return
