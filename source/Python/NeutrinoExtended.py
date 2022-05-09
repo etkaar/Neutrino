@@ -64,7 +64,7 @@ class NeutrinoExtended(NeutrinoReliable):
 	EVENTS: NeutrinoReliable
 	"""
 	# Once a packet is reliably received (= in order, not a duplicate)
-	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: tuple) -> None:
+	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		print(">>RELIABLE RECEIVED (EXTENDED)", 'packet_number', packet_number, 'packet_keyword', packet_keyword)
 	
 	"""
@@ -160,7 +160,7 @@ class NeutrinoExtended(NeutrinoReliable):
 		>   def event_*() -> ?:
 		>      pass
 	"""
-	def extended_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: tuple) -> None:
+	def extended_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, payload_words: list) -> None:
 		return
 
 	"""
