@@ -18,14 +18,31 @@ For better separation of concerns it comes in three different versions – the b
 
 <small><sup>1</sup> With the exception of the initial *PACKET_TYPE_CLIENT_HELLO1*.</small>
 
-## Requirements
+### Inspector
+
+The Inspector is used for testing purposes. For instance, it interferes with the traffic to trigger the duplicate packet or packet loss detection.
+
+### Monitoring
+
+The Monitoring class is also used for testing purposes. It more or less visualizes the traffic:
+
+![Monitoring](https://user-images.githubusercontent.com/40885610/168686183-8cf8b336-0d07-44db-9b86-7964bc03181f.png)
+
+
+### Requirements
 - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
 
 ---
 
+## Description
+
 ## 1.0 Public-Key Authentication
-The packet payload and parts of the header (containing the packet number) are encrypted using [XChaCha20-Poly1305](https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction). This functionality is provided by the easily portable libsodium project which is available in PHP and in Python via PyNaCl.
+The packet payload and parts of the header (containing the packet number) are encrypted using [XChaCha20-Poly1305](https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction). This functionality is provided by the easily portable [libsodium](https://github.com/jedisct1/libsodium) project which is available in PHP and in Python via PyNaCl.
+
+```shell
+apt install python3-nacl
+```
 
 ---
 
@@ -82,11 +99,3 @@ PAYLOAD(
    )
 )
 ```
-
----
-
-## 3.0 Code Styling
-- Python
-  - Type hints for class variables, but none for function variables.
-  - Type hints for function arguments and return values.
-
