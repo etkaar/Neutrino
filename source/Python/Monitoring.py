@@ -37,11 +37,14 @@ Monitors the network traffic. Used for debugging/testing purposes.
 """
 class Monitoring:
 
+	monitoring_started: int = 0
+
 	# Text and background colors
 	TEXT_COLOR = {
 		'DEFAULT': '\033[39m',
 		'BLACK': '\033[30m',
 		
+		'LIGHT_GRAY': '\033[37m',
 		'LIGHT_RED': '\033[91m',
 		'LIGHT_GREEN': '\033[92m',
 		'LIGHT_BLUE': '\033[94m',
@@ -73,6 +76,8 @@ class Monitoring:
 	LOG_NAME_RECV = 4
 	LOG_NAME_DROPPED = 5
 	LOG_NAME_QUIT = 6
+	LOG_NAME_RETR = 7
+	LOG_NAME_DUPLICATE = 8
 	
 	LOG_NAMES = {
 		LOG_NAME_INIT: ['  INIT  ', BG_COLOR['LIGHT_CYAN'], TEXT_COLOR['BLACK']],
@@ -80,13 +85,31 @@ class Monitoring:
 		LOG_NAME_SEND: [' ► SEND ', BG_COLOR['LIGHT_BLUE'], TEXT_COLOR['WHITE']],
 		LOG_NAME_RECV: [' ◄ RECV ', BG_COLOR['LIGHT_MAGENTA'], TEXT_COLOR['BLACK']],
 		LOG_NAME_DROPPED: [' ❌DROP ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
-		LOG_NAME_QUIT:[' ❌EXIT ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']]
+		LOG_NAME_QUIT:[' ❌EXIT ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
+		LOG_NAME_RETR:['  RETR  ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
+		LOG_NAME_DUPLICATE:[' DUPLIC ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']]
 	}
 	
 	# Empty to make inheritance easier
 	def __init__(self):
 		super().__init__()
+		
+		self.monitoring_started = self._get_current_time_milliseconds()
 	
+	# Get time in milliseconds passed since monitoring has started
+	def _get_milliseconds_passed(self) -> int:
+		return (self._get_current_time_milliseconds() - self.monitoring_started)
+	
+	# Adds leading zeros before a number and return a string
+	def _add_leading_zeros(self, max_total_length: int, number: int) -> str:
+		number = str(number)
+		amount_of_zeros = (max_total_length - len(number))
+		
+		if amount_of_zeros < 0:
+			amount_of_zeros = 0
+		
+		return ('0' * amount_of_zeros) + number
+		
 	# Format message with color
 	def color(self, message: str, text_color: str='DEFAULT', bg_color: str='DEFAULT', padding: str='') -> str:
 		return self.BG_COLOR[bg_color] + self.TEXT_COLOR[text_color] + padding + message + padding + self.RESET_COLOR
@@ -99,9 +122,22 @@ class Monitoring:
 			message += self.color(' Server ', text_color='WHITE', bg_color='LIGHT_BLUE') + ' '
 		else:
 			message += self.color(' Client ', text_color='WHITE', bg_color='LIGHT_BLUE') + ' '
-			
+		
+		
+		# The client id (CID) is only an internal value for the server which
+		# is not transmitted to the opposite endpoint. For the client, the CID
+		# will be always 'None' or -1, because it is the server. Therefore, we
+		# remove that value from the log.
+		if self.is_client() is True:
+			if 'CID' in key_values:
+				del key_values['CID']
+		
 		# Colored prefix
 		message += self.LOG_NAMES[log_name][1] + self.LOG_NAMES[log_name][2] + self.LOG_NAMES[log_name][0] + self.RESET_COLOR + ' '
+		
+		# Time
+		#message += self.color(self._add_leading_zeros(7, self._get_milliseconds_passed()), text_color='LIGHT_GRAY') + ' '
+		message += self.color(str(self._get_current_time_milliseconds())[7:], text_color='LIGHT_GRAY') + ' '
 		
 		# Any status message (or nothing)
 		if status_message is not None:
@@ -145,7 +181,6 @@ class Monitoring:
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
-		
 		return		
 	
 	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
@@ -163,7 +198,6 @@ class Monitoring:
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
-		
 		return
 		
 	def base_event_on_packet_dropped(self, error_message: str) -> None:
@@ -172,7 +206,6 @@ class Monitoring:
 		self.log(self.LOG_NAME_DROPPED, 'Packet dropped', {
 			'Message': error_message
 		})
-		
 		return
 	
 	"""
@@ -217,8 +250,7 @@ class Monitoring:
 			'CID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
-		})
-			
+		})	
 		return True
 		
 	def base_server_event_on_session_established(self, client_id: int, session_id: int) -> None:
@@ -246,4 +278,46 @@ class Monitoring:
 		super().base_server_event_on_shutdown()
 		
 		self.log(self.LOG_NAME_QUIT, 'Server is shutting down.', {})
+		return
+		
+	"""
+	Events from NeutrinoReliable
+	"""
+	def reliable_event_on_packet_retransmission_requested(self, client_id: Optional[int], session_id: int, packet_numbers_for_retransmission: list) -> None:
+		super().reliable_event_on_packet_retransmission_requested(client_id, session_id, packet_numbers_for_retransmission)
+		
+		packet_numbers = []
+		
+		for number in packet_numbers_for_retransmission:
+			packet_numbers.append(self._get_packet_number_repr(number))
+			
+		packet_numbers = ','.join(packet_numbers)
+		
+		self.log(self.LOG_NAME_RETR, 'Retransmission of {0} packet(s) requested due to probable loss.'.format(len(packet_numbers_for_retransmission)), {
+			'Packet Number(s)': packet_numbers,
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id)
+		})
+		return
+		
+	def reliable_event_on_packet_retransmitted(self, client_id: Optional[int], session_id: int, retransmitted_packet_type: int, retransmitted_packet_number: int) -> None:
+		super().reliable_event_on_packet_retransmitted(client_id, session_id, retransmitted_packet_type, retransmitted_packet_number)
+		
+		self.log(self.LOG_NAME_RETR, 'Packet retransmitted due to probable loss.', {
+			'Number': self._get_packet_number_repr(retransmitted_packet_number),
+			'Type': self.get_packet_name_by_type(retransmitted_packet_type) + ' ({0})'.format(self._get_default_int_repr(retransmitted_packet_type)),
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id)
+		})
+		return
+		
+	def reliable_event_on_duplicate_packet_detected(self, client_id: Optional[int], session_id: int, received_packet_type: int, received_packet_number: int, expected_packet_number: Optional[int]) -> None:
+		super().reliable_event_on_duplicate_packet_detected(client_id, session_id, received_packet_type, received_packet_number, expected_packet_number)
+		
+		self.log(self.LOG_NAME_DUPLICATE, 'Duplicate packet detected.', {
+			'Duplicate Packet Number': self._get_packet_number_repr(received_packet_number) + ' ({0})'.format(self._get_default_int_repr(received_packet_type)),
+			'Expected Packet Number': self._get_packet_number_repr(expected_packet_number),
+			'SID': self._get_session_id_repr(session_id),
+			'CID': self._get_client_id_repr(client_id)
+		})
 		return
