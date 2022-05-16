@@ -38,7 +38,8 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 	  
 	Requirements / Dependencies
 	  - Python >= 3.7
-	  - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
+	    - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
+	       apt install python3-nacl
 
 	Used Encryption
 	  - XChaCha20-Poly1305 (https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction)
@@ -411,15 +412,21 @@ class Neutrino:
 				try:
 					client_id = None
 					
-					# Packet from any client
-					if self.is_server() is True:
-						(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_any_client()
-					# Packet from the server
-					elif self.is_client() is True:
-						(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_the_server()
-				
-					# Trigger event
-					self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
+					try:
+						# Packet from any client
+						if self.is_server() is True:
+							(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_any_client()
+						# Packet from the server
+						elif self.is_client() is True:
+							(session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words) = self._get_next_packet_from_the_server()
+					except BlockingIOError:
+						"""
+						Normally, that error cannot happen. Nonetheless I encountered it when disturbing
+						the network using the Inspector. In that case, just continue.
+						"""
+					else:
+						# Trigger event
+						self._register_any_packet(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 					
 				# Drop unexpected packets
 				except ex.NetworkError.UnexpectedPacket as message:
@@ -613,7 +620,7 @@ class Neutrino:
 	"""
 	def _pack(self, format: str, *args) -> bytes:
 		return struct.pack(self.BYTE_ORDER + format, *args)
-			
+	
 	def _unpack(self, format: str, *args) -> tuple:
 		return struct.unpack(self.BYTE_ORDER + format, *args)
 	
@@ -705,7 +712,7 @@ class Neutrino:
 		raw_packet += raw_payload_bytes
 		
 		# Pad out packet until max size (padding) is reached
-		if padding is 0:
+		if padding == 0:
 			padding = self.MIN_PACKET_SIZE
 			
 		if padding > len(raw_packet):
@@ -713,7 +720,7 @@ class Neutrino:
 		
 		return raw_packet
 		
-	# Decrypt encoded packet (= decrypt ant then decode)
+	# Decrypt encoded packet (= decrypt and then decode)
 	def _decrypt_encoded_packet(self, raw_key: bytes, raw_packet: bytes) -> bytes:
 		# Header is partially encrypted and payload is fully encrypted
 		(left_unprotected, right_decrypted) = (raw_packet[0:self.HEADER_SIZE_LEFT], raw_packet[self.HEADER_SIZE_LEFT:])
@@ -839,7 +846,7 @@ class Neutrino:
 		# there are no packets left to read. Not relevant here,
 		# because we use Pythons DefaultSelector().
 		(raw_packet, remote_addr_pair) = self.endpoint.recvfrom(2**16)
-		
+
 		raw_packet_size = len(raw_packet)
 		
 		if raw_packet_size > self.MAX_PACKET_SIZE:
@@ -927,7 +934,6 @@ class Neutrino:
 	def _get_next_packet_from_the_server(self) -> tuple:
 		try:
 			return self._clients_read()
-		#except (Neutrino.CryptoError, Neutrino.NetworkError.InvalidPacket) as message:
 		except ex.NeutrinoException as message:
 			raise Neutrino.Instruction.DropThisPacket(message)
 	
@@ -1024,7 +1030,7 @@ class Neutrino:
 	NETWORK WRITE: PUBLIC
 	"""
 	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
-	def send_data_to_authenticated_clients(self, payload_words: list=[]) -> None:
+	def send_data_to_established_clients(self, payload_words: list=[]) -> None:
 		return self._send_to_established_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=payload_words)
 
 	# Send data packet (PACKET_TYPE_DATA) to the server
