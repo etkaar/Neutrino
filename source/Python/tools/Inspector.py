@@ -52,6 +52,7 @@ DIRNAME = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(1, os.path.abspath(DIRNAME + '/..'))
 
 import struct
+import socket
 
 from scapy.layers.inet import IP
 from scapy.layers.inet import UDP
@@ -84,18 +85,20 @@ class Inspector:
 	def __init__(self):
 		self.neutrino = Neutrino()
 		
-	# Wait for packets passed through the queue
-	def start_investigating(self) -> None:
-		nfqueue = NetfilterQueue()
-		nfqueue.bind(self.QUEUE_NUMBER, self.handle_packet)
-
-		try:
-			nfqueue.run()
-		except KeyboardInterrupt:
-			pass
+	# Handle packets passed through the queue
+	def start_interferer(self) -> None:
+		queue = NetfilterQueue()
+		queue.bind(self.QUEUE_NUMBER, self.pass_or_interfere)
+		queue.run()
+	
+	# Send UDP packet to arbitrary endpoint
+	def send_packet(self, remote_addr_pair: tuple, raw_packet: bytes) -> None:
+		endpoint = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		endpoint.sendto(raw_packet, remote_addr_pair)
+		endpoint.close()
 	
 	# Handles a single packet from the queue.
-	def handle_packet(self, raw_ip_packet: bytes) -> None:
+	def pass_or_interfere(self, raw_ip_packet: bytes) -> None:			
 		"""
 		We need to extract the UDP payload (= Neutrino packet) from the lower IP packet.
 		
@@ -104,6 +107,19 @@ class Inspector:
 		"""
 		ip_payload = IP(raw_ip_packet.get_payload())
 		udp_payload = bytes(ip_payload[UDP].payload)
+		
+		local_addr_pair = (ip_payload[IP].dst, ip_payload[UDP].dport)
+		remote_addr_pair = (ip_payload[IP].src, ip_payload[UDP].sport)
+		
+		# Eat packet with a probability of n% to provoke loss detection
+		if False:
+			if self.neutrino._get_random_int(1, 10) == 1:
+				return		
+		
+		# Duplicate packet with a probability of n%
+		if True:
+			if self.neutrino._get_random_int(1, 10) == 1:
+				self.send_packet(local_addr_pair, udp_payload)
 		
 		# Unprotected left part
 		left_unprotected = udp_payload[0:Neutrino.HEADER_SIZE_LEFT]
@@ -131,7 +147,7 @@ class Inspector:
 			session_id +=1
 		
 		# Change length of the encrypted part
-		if True:
+		if False:
 			right_encrypted = right_encrypted[1:]
 		
 		# Rebuild the packet
@@ -159,4 +175,4 @@ class Inspector:
 # Do not execute if imported as module
 if __name__ == '__main__':
 	inspector = Inspector()
-	inspector.start_investigating()
+	inspector.start_interferer()
