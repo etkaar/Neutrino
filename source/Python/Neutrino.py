@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–23 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -297,6 +297,9 @@ class Neutrino:
 	# used to prevent unnecessary KEEP_ALIVE packets.
 	client_last_packet_sent_time: int = 0
 	
+	# Same for the very last packet the client received
+	client_last_packet_received_time: int = 0
+	
 	# Calculated time (milliseconds) after client tries to re-establish a session to the server
 	client_attempt_session_reestablishment: int = 0
 	
@@ -472,6 +475,7 @@ class Neutrino:
 					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN)
 					self._disable_draining()
 				else:
+					print(">> SERVER_TIMEOUT", self.client_local_session_expire_time, self._get_current_time_milliseconds())
 					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_SERVER_TIMEOUT)
 				
 				# Session expired
@@ -493,8 +497,16 @@ class Neutrino:
 					# Set timeout for next retry
 					self.client_attempt_session_reestablishment = (self._get_current_time_milliseconds() + self.CLIENT_SESSION_TIMEOUT_REATTEMPT)
 			else:
-				# Periodically send KEEP_ALIVE packets to keep alive the session
+				# Periodically send KEEP_ALIVE packets to keep alive the session.
 				if self.client_last_packet_sent_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._get_current_time_milliseconds():
+					self._send_keep_alive_packet(None, None)
+					
+				# The server will never initiate KEEP_ALIVE packets (but respond to), so this is up to the
+				# client. But not only the client needs to send KEEP_ALIVE packets in case he didn't send
+				# any packets to the server; it could be, that the server only acts as a receiver and thus
+				# never responds to normal PACKET_TYPE_DATA packets. The client therefore also needs
+				# to initiate KEEP_ALIVE packets in case he didn't receive anything from the server.
+				elif self.client_last_packet_received_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._get_current_time_milliseconds():
 					self._send_keep_alive_packet(None, None)
 	
 	"""
@@ -859,6 +871,10 @@ class Neutrino:
 		self.statistics['packets_read_total'] += 1
 		self.statistics['bytes_read_total'] += raw_packet_size
 		
+		# Sent time of the very last packet
+		if self.is_client() is True:
+			self.client_last_packet_received_time = self._get_current_time_milliseconds()
+		
 		return (remote_addr_pair, raw_packet, packet_type, session_id)
 	
 	# Servers read function
@@ -1028,10 +1044,17 @@ class Neutrino:
 
 	"""
 	NETWORK WRITE: PUBLIC
-	"""
+	"""		
 	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
 	def send_data_to_established_clients(self, payload_words: list=[]) -> None:
 		return self._send_to_established_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=payload_words)
+
+	# Send data packet (PACKET_TYPE_DATA) to a client
+	def send_data_to_client(self, client_id: int, session_id: int=None, payload_words: list=[]) -> None:
+		if session_id is None:
+			session_id = self._get_client_session_id_by_client_id(client_id)
+			
+		return self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_DATA, session_id=session_id, payload_words=payload_words)
 
 	# Send data packet (PACKET_TYPE_DATA) to the server
 	def send_data_to_server(self, payload_words: list=[]) -> None:
@@ -1258,6 +1281,13 @@ class Neutrino:
 			return (self.client_sessions[client_id]['ip'], self.client_sessions[client_id]['port'])
 		except KeyError:
 			raise ex.ServerSideError.ClientNotFound('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None
+	
+	# Get client session id by client id
+	def _get_client_session_id_by_client_id(self, client_id: int) -> int:
+		try:
+			return self.client_sessions[client_id]['session_id']
+		except KeyError:
+			raise ex.ServerSideError.ClientNotFound('No client session identified by <client_id> (<{0}>) found.'.format(self._get_default_int_repr(client_id))) from None		
 	
 	# Get client id by session id
 	def _get_client_id_by_session_id(self, session_id: int) -> int:
