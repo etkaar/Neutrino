@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–23 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -823,7 +823,7 @@ class Neutrino:
 				offset += self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES
 				
 				if byte_word_length <= 0:
-					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(amount_of_byte_words, self.MAX_PAYLOAD_WORD_SIZE))
+					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(byte_word_length, self.MAX_PAYLOAD_WORD_SIZE))
 				
 				# Byte word ([Word = ? bytes])
 				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
