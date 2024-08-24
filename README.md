@@ -31,6 +31,10 @@ The Monitoring class is also used for testing purposes. It more or less visualiz
 - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
 
+### Example
+
+For a short exsample use `TestNeutrinoSimpleServer.py` and `TestNeutrinoSimpleClient.py`, see [here](https://github.com/etkaar/Neutrino/tree/main/source/Python/tests).
+
 ---
 
 ## Description
