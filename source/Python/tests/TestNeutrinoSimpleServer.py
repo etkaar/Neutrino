@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -78,6 +78,9 @@ class Networking(Monitoring, Neutrino):
 	# instead of 'payload_words' if you want to keep the original list unchanged.
 	def encode_payload_words(self, payload_words: list=[]) -> list:
 		for x in range(len(payload_words)):
+			if type(payload_words[x]) is not str:
+				payload_words[x] = str(payload_words[x])
+			
 			payload_words[x] = payload_words[x].encode(encoding='utf-8', errors='strict')
 			
 		return payload_words
@@ -106,15 +109,15 @@ class Networking(Monitoring, Neutrino):
 		"""
 		if False:
 			# The client will still receive this packet
-			self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=[str.encode('LatePacketForClient1')])
+			self.send_data_to_established_clients(self.encode_payload_words([str.encode('LatePacketForClient1')]))
 			
 			# Depending on SESSION_TIMEOUT_ENDING, the client will also receive this packet
 			time.sleep(2.0)
-			self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=[str.encode('LatePacketForClient2')])
+			self.send_data_to_established_clients(self.encode_payload_words([str.encode('LatePacketForClient2')]))
 			
 			# But this packet will be dropped, because it is definitely too late
 			time.sleep(0.5)
-			self._send_to_authenticated_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=[str.encode('LatePacketForClient3')])
+			self.send_data_to_established_clients(self.encode_payload_words([str.encode('LatePacketForClient3')]))
 			
 	def base_event_on_requested_frame(self, frame_number: int, milliseconds_between_frames: int) -> None:
 		super().base_event_on_requested_frame(frame_number, milliseconds_between_frames)
@@ -127,7 +130,7 @@ class Networking(Monitoring, Neutrino):
 			payload_words.append('An emoji for you: ✈️')
 			
 			# Immediately send PACKET_TYPE_DATA to all authenticated clients
-			server_endpoint.send_data_to_authenticated_clients(self.encode_payload_words(payload_words))
+			self.send_data_to_established_clients(self.encode_payload_words(payload_words))
 	
 """
 Server waiting for clients
