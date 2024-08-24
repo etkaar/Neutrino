@@ -24,8 +24,13 @@ The Inspector is used for testing purposes. For instance, it interferes with the
 
 The Monitoring class is also used for testing purposes. It more or less visualizes the traffic:
 
-![Monitoring](https://user-images.githubusercontent.com/40885610/168686183-8cf8b336-0d07-44db-9b86-7964bc03181f.png)
+#### Server
 
+![image](https://github.com/user-attachments/assets/216be854-a0c1-4471-9bd3-fa6ee17d563b)
+
+#### Client
+
+![image](https://github.com/user-attachments/assets/804e3abd-1856-423b-8be9-14f3bfd76476)
 
 ### Requirements
 - Python >= 3.7
