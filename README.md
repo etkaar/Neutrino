@@ -1,7 +1,5 @@
-**👷‍♀️ Neutrino is currently under development and not to be used in production yet. 👷**
-
 # Neutrino
-Neutrino is an encrypted and event-driven UDP based network protocol with focus on simplicity (as far this is possible which such a protocol) and high performance.
+Neutrino is an encrypted and event-driven UDP based network protocol with focus on simplicity (as far this is possible which such a protocol) and high performance. In July 2024 I started to use Neutrino in production.
 
 The idea for Neutrino initially came from [QUIC](https://en.wikipedia.org/wiki/QUIC) which is expected to replace TCP with encrypted UDP in HTTP/3. Due to the lack of implementations and the complexity of this protocol (and the lack of encryption in UDP) I decided to create Neutrino in a module based way, where in the basic version at least encrypted UDP can be provided – which is mandatory nowadays.
 
@@ -13,10 +11,10 @@ For better separation of concerns it comes in three different versions – the b
 - **NeutrinoReliable**<br>
   An extension which introduces detection and correction of packet loss and detection of duplicates or packets which are out of order.
   
-- **NeutrinoExtended**<br>
+- *NeutrinoExtended* <sup>(Not ready yet)</sup><br>
   Relies on NeutrinoReliable and raises the packet size limit.
 
-<small><sup>1</sup> With the exception of the initial *PACKET_TYPE_CLIENT_HELLO1*.</small>
+<small><sup>1</sup> With the exception of the initial *PACKET_TYPE_CLIENT_HELLO1*.</small><br>
 
 ### Inspector
 
