@@ -1,7 +1,7 @@
 # Neutrino
 Neutrino is an encrypted and event-driven UDP based network protocol with focus on simplicity (as far this is possible which such a protocol) and high performance. In July 2024 I started to use Neutrino in production.
 
-The idea for Neutrino initially came from [QUIC](https://en.wikipedia.org/wiki/QUIC) which is expected to replace TCP with encrypted UDP in HTTP/3. Due to the lack of implementations and the complexity of this protocol (and the lack of encryption in UDP) I decided to create Neutrino in a module based way, where in the basic version at least encrypted UDP can be provided – which is mandatory nowadays.
+The idea for Neutrino initially came from [QUIC](https://en.wikipedia.org/wiki/QUIC) which is expected to replace TCP with encrypted UDP in HTTP/3. Due to the lack of implementations and the complexity of this protocol (and the lack of encryption in plain UDP) I decided to create Neutrino in a module based way, where in the basic version at least encrypted UDP can be provided – which is mandatory nowadays.
 
 For better separation of concerns it comes in three different versions – the basic version and two extensions:
 
