@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -79,6 +79,8 @@ class Monitoring:
 	LOG_NAME_RETR = 7
 	LOG_NAME_DUPLICATE = 8
 	
+	LOG_NAME_APP = 9
+	
 	LOG_NAMES = {
 		LOG_NAME_INIT: ['  INIT  ', BG_COLOR['LIGHT_CYAN'], TEXT_COLOR['BLACK']],
 		LOG_NAME_STATUS: [' STATUS ', BG_COLOR['LIGHT_CYAN'], TEXT_COLOR['BLACK']],
@@ -87,7 +89,9 @@ class Monitoring:
 		LOG_NAME_DROPPED: [' ❌DROP ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
 		LOG_NAME_QUIT:[' ❌EXIT ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
 		LOG_NAME_RETR:['  RETR  ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
-		LOG_NAME_DUPLICATE:[' DUPLIC ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']]
+		LOG_NAME_DUPLICATE:[' DUPLIC ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
+		
+		LOG_NAME_APP:[' ■ APP  ', BG_COLOR['LIGHT_GREEN'], TEXT_COLOR['BLACK']]
 	}
 	
 	# Empty to make inheritance easier
@@ -181,6 +185,7 @@ class Monitoring:
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
+		
 		return		
 	
 	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
@@ -198,6 +203,7 @@ class Monitoring:
 			'Keyword': packet_keyword,
 			'Payload': payload_words
 		})
+		
 		return
 		
 	def base_event_on_packet_dropped(self, error_message: str) -> None:
@@ -206,6 +212,7 @@ class Monitoring:
 		self.log(self.LOG_NAME_DROPPED, 'Packet dropped', {
 			'Message': error_message
 		})
+		
 		return
 	
 	"""
@@ -223,6 +230,7 @@ class Monitoring:
 		self.log(self.LOG_NAME_INIT, 'SESSION ESTABLISHING (2/3): Received session id from server.', {
 			'SID': self._get_session_id_repr(session_id)
 		})
+
 		return
 	
 	def base_client_event_on_session_destroyed(self, reason: int) -> None:
@@ -231,12 +239,14 @@ class Monitoring:
 		self.log(self.LOG_NAME_QUIT, 'Session destroyed.', {
 			'Reason': self.get_client_session_destroy_reason_name_by_number(reason, '')
 		})
+		
 		return	
 	
 	def base_client_event_on_server_shutdown(self) -> None:
 		super().base_client_event_on_server_shutdown()
 		
 		self.log(self.LOG_NAME_QUIT, 'Server announced shutdown.', {})
+		
 		return	
 	
 	"""
@@ -250,7 +260,8 @@ class Monitoring:
 			'CID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
-		})	
+		})
+		
 		return True
 		
 	def base_server_event_on_session_established(self, client_id: int, session_id: int) -> None:
@@ -260,6 +271,7 @@ class Monitoring:
 			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_client_id_repr(client_id)
 		})
+		
 		return
 		
 	def base_server_event_on_client_unregistered(self, reason: int, client_id: int, session_id: int, client_ip: str, client_port: int) -> None:
@@ -272,12 +284,14 @@ class Monitoring:
 			'IP': client_ip,
 			'Port': client_port
 		})
+		
 		return
 		
 	def base_server_event_on_shutdown(self) -> None:
 		super().base_server_event_on_shutdown()
 		
 		self.log(self.LOG_NAME_QUIT, 'Server is shutting down.', {})
+		
 		return
 		
 	"""
@@ -298,6 +312,7 @@ class Monitoring:
 			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_client_id_repr(client_id)
 		})
+		
 		return
 		
 	def reliable_event_on_packet_retransmitted(self, client_id: Optional[int], session_id: int, retransmitted_packet_type: int, retransmitted_packet_number: int) -> None:
@@ -309,6 +324,7 @@ class Monitoring:
 			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_client_id_repr(client_id)
 		})
+		
 		return
 		
 	def reliable_event_on_duplicate_packet_detected(self, client_id: Optional[int], session_id: int, received_packet_type: int, received_packet_number: int, expected_packet_number: Optional[int]) -> None:
@@ -320,4 +336,5 @@ class Monitoring:
 			'SID': self._get_session_id_repr(session_id),
 			'CID': self._get_client_id_repr(client_id)
 		})
+		
 		return
