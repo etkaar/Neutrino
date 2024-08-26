@@ -66,12 +66,6 @@ such as packet loss or double-spend detection. Use NeutrinoReliable
 if you need this features and NeutrinoExtended if you need to bypass
 the practical packet size limit (MAX_PACKET_SIZE).
 
-Packet size is limited by MAX_PACKET_SIZE, which is 1280 bytes
-due to compatibility reasons. For your internal usage you may
-increase this up to ??? bytes. A UDP packet is part 
-
-Payload size is limited by MAX_PAYLOAD_SIZE.
-
 Neutrino [> NeutrinoReliable > NeutrinoExtended]
 """
 class Neutrino:
