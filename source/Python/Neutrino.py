@@ -35,6 +35,7 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 	Code Styling
 	  - Type hints for class variables, but none for function variables.
 	  - Type hints for function arguments and return values.
+	  - Tabs instead of spaces
 	  
 	Requirements / Dependencies
 	  - Python >= 3.7
@@ -60,8 +61,16 @@ from typing import Optional
 import exceptions.ExceptionsBase as ex
 
 """
-The basic Neutrino class which offers encryption, but no reliability such as
-packet loss or double-spend detection. Payload size is limited by MAX_PAYLOAD_SIZE.
+The basic Neutrino class which offers encryption but no reliability
+such as packet loss or double-spend detection. Use NeutrinoReliable
+if you need this features and NeutrinoExtended if you need to bypass
+the practical packet size limit (MAX_PACKET_SIZE).
+
+Packet size is limited by MAX_PACKET_SIZE, which is 1280 bytes
+due to compatibility reasons. For your internal usage you may
+increase this up to ??? bytes. A UDP packet is part 
+
+Payload size is limited by MAX_PAYLOAD_SIZE.
 
 Neutrino [> NeutrinoReliable > NeutrinoExtended]
 """
@@ -97,8 +106,8 @@ class Neutrino:
 	#
 	# For Neutrino Simple this is not really relevant, because it is
 	# way more likely to exceed the MAX_PAYLOAD_SIZE.
-	MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES: int = 1 # 1 byte = 2**8-1 = 0–255
-	MAX_PAYLOAD_WORD_SIZE_IN_BYTES: int = 2 # 2 bytes = 2**16-1 = 0–65535
+	MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES: int = 1 # 1 byte = 2**8-1 = 256 (0–255)
+	MAX_PAYLOAD_WORD_SIZE_IN_BYTES: int = 2 # 2 bytes = 2**16-1 = 65536 (0–65535)
 	
 	MAX_AMOUNT_OF_PAYLOAD_WORDS: int = (2**(8*MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES) - 1)
 	MAX_PAYLOAD_WORD_SIZE: int = (2**(8*MAX_PAYLOAD_WORD_SIZE_IN_BYTES) - 1)
@@ -124,7 +133,7 @@ class Neutrino:
 	# Use that in case you want to force a minimum packet size (realized by padding)
 	MIN_PACKET_SIZE: int = 0
 	
-	# Encryption invokes a small overhead (24 bytes for the nonce, 16 bytes for the encryption header). We need to take care of that once we check the limits.
+	# Encryption leads to a small overhead (24 bytes for the nonce, 16 bytes for the encryption header). We need to take care of that once we check the limits.
 	PACKET_ENCRYPTION_OVERHEAD: int = (nacl.bindings.crypto_aead.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES + nacl.bindings.crypto_aead.crypto_aead_xchacha20poly1305_ietf_ABYTES)
 	
 	# Maximum payload size
@@ -135,10 +144,11 @@ class Neutrino:
 	
 	# Max size of sequence number. If you need to change
 	# that, you also need to alter HEADER.
-	MAX_PACKET_NUMBER_SIZE: int = 2**64-1
+	MAX_PACKET_NUMBER_SIZE: int = 2**64-1 # 18446744073709551615
 	
+	# Range: 64–2147483647
 	INITIAL_PACKET_NUMBER_RANGE_MIN: int = 2**6 # 64
-	INITIAL_PACKET_NUMBER_RANGE_MAX: int = 2**31-1	
+	INITIAL_PACKET_NUMBER_RANGE_MAX: int = 2**31-1 # 2147483647
 	
 	# Packet numbers
 	PACKET_NUMBER_NONE: int = 0x01
@@ -146,7 +156,7 @@ class Neutrino:
 	
 	# Max keyword size. If you need to change
 	# that, you also need to alter HEADER.
-	MAX_PACKET_KEYWORD_SIZE: int = 2**32-1	
+	MAX_PACKET_KEYWORD_SIZE: int = 2**32-1 # 4294967295
 	
 	# We do not use keywords, as this is functionality
 	# is reserved for extended classes
@@ -170,7 +180,7 @@ class Neutrino:
 	
 	# Sessions
 	MIN_SESSION_ID_SIZE: int = 2**6 # 64
-	MAX_SESSION_ID_SIZE: int = 2**64-1
+	MAX_SESSION_ID_SIZE: int = 2**64-1 # 18446744073709551615
 	
 	INTERNAL_SESSION_STATE_NONE: int = 0
 	INTERNAL_SESSION_STATE_PENDING: int = 1
@@ -195,7 +205,7 @@ class Neutrino:
 	KEEP_ALIVE_PACKET_TIMEOUT: int = 500
 	
 	# Max client id size
-	MAX_LOCAL_CLIENT_ID_SIZE: int = 2**64-1
+	MAX_LOCAL_CLIENT_ID_SIZE: int = 2**64-1 # 18446744073709551615
 	
 	# Reconnect timeout (milliseconds) after the session expired
 	#
@@ -1018,13 +1028,16 @@ class Neutrino:
 		return self._send_packet(client_id, session_id, None, packet_type, packet_number, self.PACKET_KEYWORD_NONE, None, payload_words, padding)
 
 	# Send packet to all clients with a established session
-	def _send_to_established_clients(self, packet_type: int, payload_words: list=[], padding: int=0) -> None:
+	def _send_to_established_clients(self, packet_type: int, payload_words: list=[], padding: int=0) -> int:
+		amount_of_connected_clients = 0
+		
 		# Pass through all sessions
 		for client_id, session in self.client_sessions.items():
 			if session['session_state'] is self.INTERNAL_SESSION_STATE_ESTABLISHED:
 				self._send_to_client(client_id, packet_type, session['session_id'], payload_words, padding)
+				amount_of_connected_clients += 1
 		
-		return
+		return amount_of_connected_clients
 
 	# Send packet to the server
 	def _send_to_server(self, packet_type: int, session_id: int, payload_words: list=[], padding: int=0) -> tuple:
@@ -1046,7 +1059,7 @@ class Neutrino:
 	NETWORK WRITE: PUBLIC
 	"""		
 	# Send data packet (PACKET_TYPE_DATA) to all clients with a established session
-	def send_data_to_established_clients(self, payload_words: list=[]) -> None:
+	def send_data_to_established_clients(self, payload_words: list=[]) -> int:
 		return self._send_to_established_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=payload_words)
 
 	# Send data packet (PACKET_TYPE_DATA) to a client
@@ -1586,7 +1599,7 @@ class Neutrino:
 		return words
 		
 	# Random integer between MIN and MAX
-	def _get_random_int(self, min: int, max: int):
+	def _get_random_int(self, min: int, max: int) -> int:
 		random = secrets.randbelow((max + 1))
 		
 		if random < min:
