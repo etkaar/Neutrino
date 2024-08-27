@@ -16,6 +16,10 @@ For better separation of concerns it comes in three different versions – the b
 
 <small><sup>1</sup> With the exception of the initial *PACKET_TYPE_CLIENT_HELLO1*.</small><br>
 
+### Examples
+
+For a short example use `ServerExampleNeutrinoReliable.py` and `ClientExampleNeutrinoReliable.py`, see [here](https://github.com/etkaar/Neutrino/tree/main/source/Python/examples).
+
 ### Inspector
 
 The Inspector is used for testing purposes. For instance, it interferes with the traffic to trigger the duplicate packet or packet loss detection.
@@ -35,10 +39,6 @@ The Monitoring class is also used for testing purposes. It more or less visualiz
 ### Requirements
 - Python >= 3.7
   - PyNaCl (libsodium / https://github.com/jedisct1/libsodium)
-
-### Example
-
-For a short exsample use `TestNeutrinoSimpleServer.py` and `TestNeutrinoSimpleClient.py`, see [here](https://github.com/etkaar/Neutrino/tree/main/source/Python/tests).
 
 ---
 
