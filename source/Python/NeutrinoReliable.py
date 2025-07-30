@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–22 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -163,7 +163,7 @@ class NeutrinoReliable(Neutrino):
 				try:
 					(requested_packet_number,) = self._expect_n_words(payload_words, exactly=1)
 				except ExBase.UnexpectedAmountOfWords:
-					raise ExBase.NetworkError.InvalidPacket('Malformed REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
+					raise ExBase.NetworkError.InvalidPacket('Malformed PACKET_TYPE_REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
 			
 				# Convert bytes back to 64-bit integer
 				requested_packet_number = self._int64_from_bytes(requested_packet_number)
@@ -272,7 +272,7 @@ class NeutrinoReliable(Neutrino):
 		if endpoint_id not in self.requested_retransmission:
 			self.requested_retransmission[endpoint_id] = {}
 		
-		# The is the packet number where we know that itself and all packet numbers lower than it were
+		# This is the packet number where we know that itself and all packet numbers lower than it were
 		# successfully received or retransmitted, so no uncompensated loss must be left behind.
 		latest_confirmed_packet_number = self.buffer_incoming[endpoint_id]['latest_confirmed_packet_number']
 		
@@ -472,7 +472,7 @@ class NeutrinoReliable(Neutrino):
 	"""
 	OVERRIDINGS / EXTENSIONS
 	"""
-	# Override to inject the latest confirmed packet numbers into the KEEP_ALIVE packets
+	# Override to inject the latest confirmed packet number into the KEEP_ALIVE packets
 	# in order to allow the other endpoint to clear its outgoing buffer.
 	#
 	# PAYLOAD
