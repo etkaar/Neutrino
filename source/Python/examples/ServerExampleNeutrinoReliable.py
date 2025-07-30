@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -121,7 +121,7 @@ class Networking(Monitoring, Neutrino):
 	def base_event_on_requested_frame(self, frame_number: int, milliseconds_between_frames: int) -> None:
 		super().base_event_on_requested_frame(frame_number, milliseconds_between_frames)
 
-		# The time between frames can be < 1 ms. So we do that only each second.
+		# The time between frames can be < 1 ms. So we do that only all two seconds.
 		if self.each_timeframe(2000):
 			payload_words = []
 			
@@ -186,9 +186,15 @@ server_public_key_hex = 'a923e0968a713987d76eba139c434ec3d85d7903f7605b02dcbf099
 # Keep that secret and regenerate a new one for your application. Must not be shared with clients.
 server_secret_key_hex = '59a13dd4ed21a0e87432094c3677ae9e34a0f5c1f19686280b54421b603a2bed'
 
+"""
+DNS outages can occur even if you use global resolvers. Such an event
+can have a drastic impact to your sockets, so it is recommended to create
+a fixed record for the hostname (e.g. /etc/hosts on GNU/Linux).
+"""
+
 # Create server endpoint
 server_endpoint = Networking()
-server_endpoint.init(host='127.0.0.1', port=22753, server=True)
+server_endpoint.init(host='0.0.0.0', port=22753, server=True)
 
 server_endpoint.load_keys(server_public_key_hex, server_secret_key_hex, None)
 
