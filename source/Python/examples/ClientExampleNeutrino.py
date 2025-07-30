@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -132,6 +132,12 @@ Client connects to server
 """
 # Permanent Server Public Key: Shared with the clients.
 server_public_key_hex = 'a923e0968a713987d76eba139c434ec3d85d7903f7605b02dcbf09996a6b535d'
+
+"""
+DNS outages can occur even if you use global resolvers. Such an event
+can have a drastic impact to your sockets, so it is recommended to create
+a fixed record for the hostname (e.g. /etc/hosts on GNU/Linux).
+"""
 
 # Create client endpoint
 client_endpoint = Networking()
