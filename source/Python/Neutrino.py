@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -479,7 +479,6 @@ class Neutrino:
 					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_SERVER_SHUTDOWN)
 					self._disable_draining()
 				else:
-					print(">> SERVER_TIMEOUT", self.client_local_session_expire_time, self._get_current_time_milliseconds())
 					self._destroy_session(self.CLIENT_SESSION_DESTROY_REASON_SERVER_TIMEOUT)
 				
 				# Session expired
