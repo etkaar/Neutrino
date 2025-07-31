@@ -304,6 +304,10 @@ class Neutrino:
 	# Same for the very last packet the client received
 	client_last_packet_received_time: int = 0
 	
+	# Same for the last KEEP_ALIVE packet the client sent;
+	# used to prevent duplicate KEEP_ALIVE packets.
+	client_last_keep_alive_sent_time: int = 0
+	
 	# Calculated time (milliseconds) after client tries to re-establish a session to the server
 	client_attempt_session_reestablishment: int = 0
 	
@@ -499,18 +503,34 @@ class Neutrino:
 					
 					# Set timeout for next retry
 					self.client_attempt_session_reestablishment = (self._get_current_time_milliseconds() + self.CLIENT_SESSION_TIMEOUT_REATTEMPT)
+			# Periodically send KEEP_ALIVE packets to keep alive the session.
+			#
+			# If server and client have enough data to send, then no KEEP_ALIVE packets
+			# will be sent effectively, because they are not required for base Neutrino.
+			#
+			# For NeutrinoReliable this is a different story, as it will use these
+			# packets as confirmations for the latest confirmed packet numbers.
 			else:
-				# Periodically send KEEP_ALIVE packets to keep alive the session.
-				if self.client_last_packet_sent_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._get_current_time_milliseconds():
+				corrected_keep_alive_timeout = (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME)
+				
+				# If the client hasn't sent any packets to the server for some time
+				if self.client_last_packet_sent_time + corrected_keep_alive_timeout < self._get_current_time_milliseconds():
 					self._send_keep_alive_packet(None, None)
-					
-				# The server will never initiate KEEP_ALIVE packets (but respond to), so this is up to the
-				# client. But not only the client needs to send KEEP_ALIVE packets in case he didn't send
-				# any packets to the server; it could be, that the server only acts as a receiver and thus
-				# never responds to normal PACKET_TYPE_DATA packets. The client therefore also needs
-				# to initiate KEEP_ALIVE packets in case he didn't receive anything from the server.
-				elif self.client_last_packet_received_time + (self.KEEP_ALIVE_PACKET_TIMEOUT - self.CLIENTS_TICK_TIME) < self._get_current_time_milliseconds():
-					self._send_keep_alive_packet(None, None)
+				
+				# Only the client initiates KEEP_ALIVE packets while the server will only respond to them, but
+				# won't be the first sending such a packet. It can happen that the client sends data packets
+				# (PACKET_TYPE_DATA) to a server which only acts a listener and thus never responds to such
+				# packets. It is not our job to decide here whether a server/listener shall be programmed
+				# in such a way; but in that particular case the client simply can't know if the server is
+				# still there, so the connection to the server will forcibly closed by the client due to
+				# a timeout with (CLIENT_SESSION_DESTROY_REASON_SERVER_TIMEOUT).
+				#
+				# The right way to find out if the server is still there is to send out a KEEP_ALIVE packet.
+				elif self.client_last_packet_received_time + corrected_keep_alive_timeout < self._get_current_time_milliseconds():
+					# Validate, that the last KEEP_ALIVE packet wasn't already sent
+					# due to a timeout of self.client_last_packet_received_time
+					if self.client_last_keep_alive_sent_time + corrected_keep_alive_timeout < self._get_current_time_milliseconds():
+						self._send_keep_alive_packet(None, None)
 	
 	"""
 	CRYPTO KEYS
@@ -1547,6 +1567,9 @@ class Neutrino:
 			# Not, if already draining
 			if not self._is_draining():
 				self._send_to_server(packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=self.client_session_id, payload_words=payload_words)
+				
+				# Sent time of the very last KEEP_ALIVE packet
+				self.client_last_keep_alive_sent_time = self._get_current_time_milliseconds()
 		elif self.is_server() is True:
 			self._send_to_client(client_id=client_id, packet_type=self.PACKET_TYPE_KEEP_ALIVE, session_id=session_id, payload_words=payload_words)
 	
