@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–24 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -140,8 +140,8 @@ class Monitoring:
 		message += self.LOG_NAMES[log_name][1] + self.LOG_NAMES[log_name][2] + self.LOG_NAMES[log_name][0] + self.RESET_COLOR + ' '
 		
 		# Time
-		#message += self.color(self._add_leading_zeros(7, self._get_milliseconds_passed()), text_color='LIGHT_GRAY') + ' '
-		message += self.color(str(self._get_current_time_milliseconds())[7:], text_color='LIGHT_GRAY') + ' '
+		timestamp_formatted = str(self._get_current_time_milliseconds())[7:-4] + ' ' + str(self._get_current_time_milliseconds())[9:]
+		message += self.color(timestamp_formatted, text_color='LIGHT_GRAY') + ' '
 		
 		# Any status message (or nothing)
 		if status_message is not None:
