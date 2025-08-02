@@ -98,7 +98,7 @@ PAYLOAD(
 )
 ```
 
-#### 2.2.1 NeutrinoReliableExtended
+#### 2.2.2 NeutrinoReliableExtended
 
 ```lua
 PAYLOAD(
