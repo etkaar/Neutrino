@@ -57,22 +57,47 @@ apt install python3-nacl
 
 ---
 
-## 2.0 Packet Format
+## 2.0 Packets
+
+### 2.1 List
+
+```lua
+PACKET_TYPE_CLIENT_HELLO1: int = 0x01
+PACKET_TYPE_SERVER_HELLO2: int = 0x02
+PACKET_TYPE_CLIENT_HELLO3: int = 0x03
+PACKET_TYPE_KEEP_ALIVE: int = 0x04
+PACKET_TYPE_CLIENT_GOOD_BYE: int = 0x05
+PACKET_TYPE_SERVER_SHUTDOWN: int = 0x06
+PACKET_TYPE_DATA: int = 0x47
+```
+
+#### 2.1.1 Type `PACKET_TYPE_CLIENT_HELLO1`
+
+The only unprotected (non-encrypted) packet is `PACKET_TYPE_CLIENT_HELLO1`. It is sent by the client to the server in establish_session_to_server().
+
+#### 2.1.2 Type `PACKET_TYPE_SERVER_HELLO2`
+#### 2.1.3 Type `PACKET_TYPE_CLIENT_HELLO3`
+#### 2.1.4 Type `PACKET_TYPE_KEEP_ALIVE`
+#### 2.1.5 Type `PACKET_TYPE_CLIENT_GOOD_BYE`
+#### 2.1.6 Type `PACKET_TYPE_SERVER_SHUTDOWN`
+#### 2.1.7 Type `PACKET_TYPE_DATA`
+
+### 2.2 Format
 
 ```lua
 RAW_PACKET = (HEADER + PAYLOAD)
 ```
 
-### 2.1 Header
+#### 2.2.1 Header
 
 The header consists of a left and right part. While the left part is unprotected (not encrypted), the right side – which includes the packet number – is protected (encrypted).
 
 ```lua
 HEADER(
    UNPROTECTED(
-      [Protocol Identifier = u32 bit (4 bytes)]
-      [Protocol Version = u8 bit (1 byte)]
-      [Type = u8 bit (1)]
+      [Protocol Identifier = u32 bit (4 bytes)] = 0x5baa260c
+      [Protocol Version = u8 bit (1 byte)] = 0x02
+      [Packet Type = u8 bit (1)] = e.g. PACKET_TYPE_CLIENT_HELLO1
       [Session ID = u64 bit (8 bytes)]
    )
 
@@ -83,9 +108,9 @@ HEADER(
 )
 ```
 
-### 2.2 Payload
+#### 2.2.2 Payload
 
-#### 2.2.1 Neutrino and NeutrinoReliable
+##### 2.2.2.1 Neutrino and NeutrinoReliable
 
 ```lua
 PAYLOAD(
@@ -98,7 +123,7 @@ PAYLOAD(
 )
 ```
 
-#### 2.2.2 NeutrinoReliableExtended
+##### 2.2.2.2 NeutrinoReliableExtended
 
 ```lua
 PAYLOAD(
