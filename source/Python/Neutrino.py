@@ -825,7 +825,7 @@ class Neutrino:
 		payload_bytes_size = len(payload_bytes)
 		
 		if payload_bytes_size == 0:
-			raise ex.NetworkError.InvalidPacket('Empty payload received. Total packet site: {0} bytes.'.format(len(raw_packet)))
+			raise ex.NetworkError.InvalidPacket('Empty payload received. Total packet size: {0} bytes.'.format(len(raw_packet)))
 		
 		# Get and validate amount of payload words 
 		(amount_of_byte_words,) = self._unpack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, payload_bytes[0:self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES])
