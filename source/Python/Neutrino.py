@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–26 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -259,25 +259,25 @@ class Neutrino:
 	"""
 	# We store the server keypair (public + secret key) from the examples here
 	# to make sure they are not accidentially used in a productive environment.
-	EXAMPLE_SERVER_PUBLIC_KEY_HEX = 'a923e0968a713987d76eba139c434ec3d85d7903f7605b02dcbf09996a6b535d'
-	EXAMPLE_SERVER_SECRET_KEY_HEX = '59a13dd4ed21a0e87432094c3677ae9e34a0f5c1f19686280b54421b603a2bed'
+	EXAMPLE_SERVER_PUBLIC_KEY_HEX: str = 'a923e0968a713987d76eba139c434ec3d85d7903f7605b02dcbf09996a6b535d'
+	EXAMPLE_SERVER_SECRET_KEY_HEX: str = '59a13dd4ed21a0e87432094c3677ae9e34a0f5c1f19686280b54421b603a2bed'
 	
 	"""
 	VARIABLES: CRYPTO
 	"""
-	local_public_key: bytes = None
-	local_secret_key: bytes = None
-	remote_public_key: bytes = None	
+	local_public_key: Optional[bytes] = None
+	local_secret_key: Optional[bytes] = None
+	remote_public_key: Optional[bytes] = None	
 	
 	"""
 	VARIABLES: ANY ENDPOINT
 	"""
 	# Host and port of UDP endpoint
-	host: str = None
-	port: str = None
+	host: Optional[str] = None
+	port: Optional[str] = None
 	
 	# Defines if this endpoint is a client or server
-	server = False
+	server: bool = False
 	
 	# Endpoint UDP (datagram) socket
 	endpoint = None
@@ -291,8 +291,8 @@ class Neutrino:
 	client_draining_started: int = 0
 	
 	# Session id, packet number, ...
-	client_session_id: int = None
-	client_packet_number: int = None
+	client_session_id: Optional[int] = None
+	client_packet_number: Optional[int] = None
 	
 	# Precalculated session expire time in milliseconds
 	client_local_session_expire_time: int = 0
@@ -312,8 +312,8 @@ class Neutrino:
 	client_attempt_session_reestablishment: int = 0
 	
 	# Used by the client to interact with encrypted packets
-	client_read_key: bytes = None
-	client_write_key: bytes = None
+	client_read_key: Optional[bytes] = None
+	client_write_key: Optional[bytes] = None
 	
 	"""
 	VARIABLES: SERVER SIDE ENDPOINT
@@ -825,7 +825,7 @@ class Neutrino:
 		payload_bytes_size = len(payload_bytes)
 		
 		if payload_bytes_size == 0:
-			raise ex.NetworkError.InvalidPacket('Empty payload received.')
+			raise ex.NetworkError.InvalidPacket('Empty payload received. Total packet site: {0} bytes.'.format(len(raw_packet)))
 		
 		# Get and validate amount of payload words 
 		(amount_of_byte_words,) = self._unpack(self.FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS, payload_bytes[0:self.MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES])
