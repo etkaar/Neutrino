@@ -135,3 +135,8 @@ PAYLOAD(
    )
 )
 ```
+
+## 3.0 
+
+request_frame() >> _get_next_packet_from_the_server() >> _clients_read() >> _read()
+request_frame() >> _get_next_packet_from_any_client() >> _servers_read() >> _read()
