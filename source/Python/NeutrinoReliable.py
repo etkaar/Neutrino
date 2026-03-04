@@ -163,7 +163,7 @@ class NeutrinoReliable(Neutrino):
 				try:
 					(requested_packet_number,) = self._expect_n_words(payload_words, exactly=1)
 				except ExBase.UnexpectedAmountOfWords:
-					raise ExBase.NetworkError.InvalidPacket('Malformed REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
+					raise ExBase.NetworkError.InvalidPacket('Malformed PACKET_TYPE_REQUEST_RETRANSMISSION: Expected exactly one (1) word in payload.') from None
 			
 				# Convert bytes back to 64-bit integer
 				requested_packet_number = self._int64_from_bytes(requested_packet_number)
