@@ -63,10 +63,10 @@ import exceptions.ExceptionsBase as ex
 """
 The basic Neutrino class which offers encryption but no reliability
 such as packet loss or double-spend detection. Use NeutrinoReliable
-if you need this features and NeutrinoExtended if you need to bypass
-the practical packet size limit (MAX_PACKET_SIZE).
+if you need this features and NeutrinoReliableExtended if you need to
+bypass the practical packet size limit (MAX_PACKET_SIZE).
 
-Neutrino [> NeutrinoReliable > NeutrinoExtended]
+Neutrino [> NeutrinoReliable > NeutrinoReliableExtended]
 """
 class Neutrino:
 	"""
@@ -190,7 +190,7 @@ class Neutrino:
 	
 	# Time in milliseconds after a KEEP_ALIVE packet is sent if there is no communication between
 	# the endpoints observed. This functionality is mandatory for the loss detection used
-	# in NeutrinoExtended, so do not increase this value without a good reason.
+	# in NeutrinoReliableExtended, so do not increase this value without a good reason.
 	#
 	# NOTE: Must be lower than SESSION_TIMEOUT_ESTABLISHED to keep session alive and
 	# greater than SESSION_TIMEOUT_PENDING, because KEEP_ALIVE is only allowed for
