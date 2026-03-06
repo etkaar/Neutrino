@@ -142,6 +142,8 @@ PAYLOAD(
 
 #### 3.1.1 Neutrino
 
+#### 3.1.1.1 General Events
+
 ##### base_event_on_requested_frame()
 ##### base_event_on_packet_received()
 ##### base_event_on_packet_sent()
@@ -150,11 +152,15 @@ PAYLOAD(
 ##### base_event_on_register_client_packet()
 ##### base_event_on_register_server_packet()
 
+#### 3.1.1.2 Server Events
+
 ##### base_server_event_on_session_request()
 ##### base_server_event_on_session_established()
 ##### base_server_event_on_client_unregistered()
 ##### base_server_event_on_client_addr_change()
 ##### base_server_event_on_shutdown()
+
+#### 3.1.1.3 Client Events
 
 ##### base_client_event_on_request_session()
 ##### base_client_event_on_session_establishing()
