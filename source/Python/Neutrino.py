@@ -103,8 +103,8 @@ class Neutrino:
 	MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES: int = 1 # 1 byte = 2**8-1 = 256 (0–255)
 	MAX_PAYLOAD_WORD_SIZE_IN_BYTES: int = 2 # 2 bytes = 2**16-1 = 65536 (0–65535)
 	
-	MAX_AMOUNT_OF_PAYLOAD_WORDS: int = (2**(8*MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES) - 1)
-	MAX_PAYLOAD_WORD_SIZE: int = (2**(8*MAX_PAYLOAD_WORD_SIZE_IN_BYTES) - 1)
+	MAX_AMOUNT_OF_PAYLOAD_WORDS: int = (2**(8*MAX_AMOUNT_OF_PAYLOAD_WORDS_IN_BYTES) - 1) # 255
+	MAX_PAYLOAD_WORD_SIZE: int = (2**(8*MAX_PAYLOAD_WORD_SIZE_IN_BYTES) - 1) # 65535
 	
 	FORMAT_CHAR_MAX_AMOUNT_OF_PAYLOAD_WORDS: str = 'B' # Unsigned char (1 byte)
 	FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE: str = 'H' # Unsigned short (2 bytes)
@@ -274,7 +274,7 @@ class Neutrino:
 	"""
 	# Host and port of UDP endpoint
 	host: Optional[str] = None
-	port: Optional[str] = None
+	port: Optional[int] = None
 	
 	# Defines if this endpoint is a client or server
 	server: bool = False
@@ -536,7 +536,7 @@ class Neutrino:
 	CRYPTO KEYS
 	"""	
 	# Loads local and remote keys
-	def load_keys(self, local_public_key_hex: str, local_secret_key_hex: str, remote_public_key_hex: str=None) -> None:
+	def load_keys(self, local_public_key_hex: str, local_secret_key_hex: str, remote_public_key_hex: Optional[str]=None) -> None:
 		self._load_local_keypair(local_public_key_hex, local_secret_key_hex)
 
 		# Warn against accidential use of the example keypair
@@ -548,7 +548,7 @@ class Neutrino:
 			self._reload_local_crypto_keys()
 	
 	# Loads the endpoints keypair, where the keys must be applied in hex
-	def _load_local_keypair(self, local_public_key_hex: str=None, local_secret_key_hex: str=None) -> None:
+	def _load_local_keypair(self, local_public_key_hex: Optional[str]=None, local_secret_key_hex: Optional[str]=None) -> None:
 		# Auto-generate for clients, because they usually use a new keypair for each session establishment
 		if self.is_client() is True:
 			if local_public_key_hex is None and local_secret_key_hex is None:
@@ -570,7 +570,7 @@ class Neutrino:
 		return self.local_public_key	
 	
 	# Loads the public key of the remote endpoint (usually the servers one)
-	def _load_remote_public_key(self, remote_public_key_hex: str=None) -> None:	
+	def _load_remote_public_key(self, remote_public_key_hex: Optional[str]=None) -> None:	
 		# Clients need to load the public key of the server
 		try:
 			self.remote_public_key = bytes.fromhex(remote_public_key_hex)
@@ -715,7 +715,7 @@ class Neutrino:
 		return raw_packet_encrypted
 	
 	# Encode packet from raw bytes words (this does not take care of UTF-8 encodes strings)
-	def _encode_packet(self, packet_type: int, packet_number: int, packet_keyword: int, session_id: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> bytes:
+	def _encode_packet(self, packet_type: int, packet_number: int, packet_keyword: int, session_id: int, raw_payload_bytes: Optional[bytes]=None, payload_words: list=[], padding: int=0) -> bytes:
 		if type(packet_type) is not int:
 			raise ex.EncodingError("'packet_type' must be type of 'int', but given: {0}".format(packet_type))
 			
@@ -819,7 +819,7 @@ class Neutrino:
 	# Decode the (usually previously) decrypted payload of the packet
 	def _decode_and_validate_decrypted_packet_payload(self, raw_packet: bytes) -> tuple:
 		# Payload is the rest of the packet
-		payload_bytes = raw_packet[self.TOTAL_HEADER_SIZE:]	
+		payload_bytes = raw_packet[self.TOTAL_HEADER_SIZE:]
 		
 		# No payload
 		payload_bytes_size = len(payload_bytes)
@@ -995,7 +995,7 @@ class Neutrino:
 		return bytes_sent
 	
 	# Send packet to any endpoint
-	def _send_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, packet_keyword: int, raw_payload_bytes: bytes=None, payload_words: list=[], padding: int=0) -> tuple:
+	def _send_packet(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], packet_type: int, packet_number: int, packet_keyword: int, raw_payload_bytes: Optional[bytes]=None, payload_words: list=[], padding: int=0) -> tuple:
 		# Ensure client_id is given if endpoint is the server
 		if self.is_server() is True and client_id is None:
 			raise ex.LogicError("'client_id' cannot be None if packet is sent to a client.")
@@ -1076,7 +1076,7 @@ class Neutrino:
 		return self._send_to_established_clients(packet_type=self.PACKET_TYPE_DATA, payload_words=payload_words)
 
 	# Send data packet (PACKET_TYPE_DATA) to a client
-	def send_data_to_client(self, client_id: int, session_id: int=None, payload_words: list=[]) -> None:
+	def send_data_to_client(self, client_id: int, session_id: Optional[int]=None, payload_words: list=[]) -> None:
 		if session_id is None:
 			session_id = self._get_client_session_id_by_client_id(client_id)
 			
