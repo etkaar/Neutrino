@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-Copyright (c) 2021–25 etkaar <https://github.com/etkaar/Neutrino>
+Copyright (c) 2021–26 etkaar <https://github.com/etkaar/Neutrino>
 
 Restriction (Standard OSPAA 1.0): Only for legal entities with a yearly
 revenue exceeding fifty (50) million US-Dollar (or an equivalent of) the
@@ -35,12 +35,27 @@ from typing import Optional
 """
 Monitors the network traffic. Used for debugging/testing purposes.
 """
-class Monitoring:
-
-	monitoring_started: int = 0
+class Monitoring:	
+	"""
+	CONSTANTS
+	"""
+	# Packets with these types won't be monitored
+	SUPPRESS_LIST_PACKET_TYPES: list = [
+		# PACKET_TYPE_KEEP_ALIVE
+		#0x04
+	]
+	
+	# A raw packet exceeding this length is trunacted
+	MAX_VISIBLE_RAW_PACKET_SIZE: int = 32
+	
+	# A payload word exceeding this length is trunacted
+	MAX_VISIBLE_PAYLOAD_SIZE: int = 32
+	
+	# Max amount of payload words shown
+	MAX_AMOUNT_OF_PAYLOADS_SHOWN: int = 8
 
 	# Text and background colors
-	TEXT_COLOR = {
+	TEXT_COLOR: dict = {
 		'DEFAULT': '\033[39m',
 		'BLACK': '\033[30m',
 		
@@ -54,7 +69,7 @@ class Monitoring:
 		'WHITE': '\033[97m'
 	}
 	
-	BG_COLOR = {
+	BG_COLOR: dict = {
 		'DEFAULT': '\033[49m',
 		
 		'LIGHT_RED': '\033[101m',
@@ -67,25 +82,27 @@ class Monitoring:
 		'WHITE': '\033[107m'
 	}
 	
-	RESET_COLOR = '\033[0m'
+	RESET_COLOR: str = '\033[0m'
 
 	# Names
-	LOG_NAME_INIT = 1
-	LOG_NAME_STATUS = 2
-	LOG_NAME_SEND = 3
-	LOG_NAME_RECV = 4
-	LOG_NAME_DROPPED = 5
-	LOG_NAME_QUIT = 6
-	LOG_NAME_RETR = 7
-	LOG_NAME_DUPLICATE = 8
+	LOG_NAME_INIT: int = 1
+	LOG_NAME_STATUS: int = 2
+	LOG_NAME_SEND: int = 3
+	LOG_NAME_RECV_UNRELIABLE: int = 4
+	LOG_NAME_RECV_RELIABLE: int = 5
+	LOG_NAME_DROPPED: int = 6
+	LOG_NAME_QUIT: int = 7
+	LOG_NAME_RETR: int = 8
+	LOG_NAME_DUPLICATE: int = 9
 	
-	LOG_NAME_APP = 9
+	LOG_NAME_APP: int = 10
 	
-	LOG_NAMES = {
+	LOG_NAMES: dict = {
 		LOG_NAME_INIT: ['  INIT  ', BG_COLOR['LIGHT_CYAN'], TEXT_COLOR['BLACK']],
 		LOG_NAME_STATUS: [' STATUS ', BG_COLOR['LIGHT_CYAN'], TEXT_COLOR['BLACK']],
 		LOG_NAME_SEND: [' ► SEND ', BG_COLOR['LIGHT_BLUE'], TEXT_COLOR['WHITE']],
-		LOG_NAME_RECV: [' ◄ RECV ', BG_COLOR['LIGHT_MAGENTA'], TEXT_COLOR['BLACK']],
+		LOG_NAME_RECV_UNRELIABLE: [' ❓RECV ', BG_COLOR['LIGHT_MAGENTA'], TEXT_COLOR['BLACK']],
+		LOG_NAME_RECV_RELIABLE: [' ✅RECV ', BG_COLOR['LIGHT_MAGENTA'], TEXT_COLOR['BLACK']],
 		LOG_NAME_DROPPED: [' ❌DROP ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
 		LOG_NAME_QUIT:[' ❌EXIT ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
 		LOG_NAME_RETR:['  RETR  ', BG_COLOR['LIGHT_RED'], TEXT_COLOR['WHITE']],
@@ -93,6 +110,11 @@ class Monitoring:
 		
 		LOG_NAME_APP:[' ■ APP  ', BG_COLOR['LIGHT_GREEN'], TEXT_COLOR['BLACK']]
 	}
+	
+	"""
+	VARIABLES
+	"""
+	monitoring_started: int = 0
 	
 	# Empty to make inheritance easier
 	def __init__(self):
@@ -133,8 +155,8 @@ class Monitoring:
 		# will be always 'None' or -1, because it is the server. Therefore, we
 		# remove that value from the log.
 		if self.is_client() is True:
-			if 'CID' in key_values:
-				del key_values['CID']
+			if 'Client ID' in key_values:
+				del key_values['Client ID']
 		
 		# Colored prefix
 		message += self.LOG_NAMES[log_name][1] + self.LOG_NAMES[log_name][2] + self.LOG_NAMES[log_name][0] + self.RESET_COLOR + ' '
@@ -156,6 +178,65 @@ class Monitoring:
 		
 		print(message)
 		
+	# Create a trunacted representation of the payload words
+	def _get_payload_representation(self, payload_words: list=[]) -> str:
+		representation_list = []
+		
+		amount_of_words = len(payload_words)
+		
+		for x in range(min(amount_of_words, self.MAX_AMOUNT_OF_PAYLOADS_SHOWN)):
+			word_representation = ''
+			
+			byte_word = payload_words[x]
+			word_size = len(byte_word)
+			
+			word_representation += "'"
+			
+			if word_size > self.MAX_VISIBLE_PAYLOAD_SIZE:
+				start = self._bytes_to_string(byte_word[:int(self.MAX_VISIBLE_PAYLOAD_SIZE / 2)])
+				end = self._bytes_to_string(byte_word[(-1) * int(self.MAX_VISIBLE_PAYLOAD_SIZE / 2):])
+				
+				word_representation += start.rstrip()
+				word_representation += '...'
+				word_representation += end.lstrip()
+			else:
+				word_representation += self._bytes_to_string(byte_word)
+				
+			word_representation += "'"
+			word_representation += ' ({0} bytes)'.format(word_size)
+			
+			representation_list.append(word_representation)
+		
+		full_representation = '[' + ', '.join(representation_list) + ']'
+		
+		# Show how many payload words aren't shown due to the limit
+		remaining_words = amount_of_words - self.MAX_AMOUNT_OF_PAYLOADS_SHOWN
+		
+		if remaining_words > 0:
+			full_representation += ' +{0} word(s) remaining.'.format(remaining_words)
+		
+		return full_representation
+		
+	# Create a trunacted raw packet representation
+	def _get_raw_packet_representation(self, raw_packet: bytes) -> str:
+		representation = ''
+		
+		if len(raw_packet) > self.MAX_VISIBLE_RAW_PACKET_SIZE:
+			start = self._bytes_to_string(raw_packet[:int(self.MAX_VISIBLE_RAW_PACKET_SIZE / 2)])
+			end = self._bytes_to_string(raw_packet[(-1) * int(self.MAX_VISIBLE_RAW_PACKET_SIZE / 2):])
+			
+			representation = start + '...' + end
+		else:
+			representation = self._bytes_to_string(raw_packet)
+		
+		return "'" + representation + "'"
+	
+	# We don't want to use bytes.decode() instead because the payload
+	# is not necessarily human readable content
+	def _bytes_to_string(self, bytes_representation: bytes) -> str:
+		# Remove byte prefix (b'...') including the single quotes
+		return str(bytes_representation)[2:-1]
+		
 	# Convert dict to a colored 'Key: Value' representation
 	def create_colored_key_values_string(self, key_values: dict) -> None:
 		message = ''
@@ -173,36 +254,60 @@ class Monitoring:
 	def base_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		super().base_event_on_packet_received(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
+		if packet_type in self.SUPPRESS_LIST_PACKET_TYPES:
+			return
+		
 		# Raw packet size
 		raw_packet_size = len(raw_packet)
 		
-		self.log(self.LOG_NAME_RECV, None, {
+		# Amount of payload byte words
+		amount_of_byte_words = len(payload_words)
+		
+		log_data = {
 			self.get_packet_name_by_type(packet_type): self._get_default_int_repr(packet_type),
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_default_int_repr(client_id),
-			'Size': raw_packet_size,
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_default_int_repr(client_id),
+			'Packet Size': raw_packet_size,
 			'Number': self._get_packet_number_repr(packet_number),
-			'Keyword': packet_keyword,
-			'Payload': payload_words
-		})
+			'Keyword': packet_keyword
+		}
+		
+		if amount_of_byte_words == 0:
+			log_data['Raw Packet ({0} Bytes)'.format(raw_packet_size)] = self._get_raw_packet_representation(raw_packet)
+		else:
+			log_data['Payload ({0} Words)'.format(amount_of_byte_words)] = self._get_payload_representation(payload_words)
+		
+		self.log(self.LOG_NAME_RECV_UNRELIABLE, None, log_data)
 		
 		return		
 	
 	def base_event_on_packet_sent(self, client_id: Optional[int], session_id: int, remote_addr_pair: Optional[tuple], raw_packet: bytes, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
 		super().base_event_on_packet_sent(client_id, session_id, remote_addr_pair, raw_packet, packet_type, packet_number, packet_keyword, payload_words)
 		
+		if packet_type in self.SUPPRESS_LIST_PACKET_TYPES:
+			return		
+		
 		# Raw packet size
 		raw_packet_size = len(raw_packet)
 		
-		self.log(self.LOG_NAME_SEND, None, {
+		# Amount of payload byte words
+		amount_of_byte_words = len(payload_words)
+		
+		log_data = {
 			self.get_packet_name_by_type(packet_type): self._get_default_int_repr(packet_type),
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_default_int_repr(client_id),
-			'Size': raw_packet_size,
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_default_int_repr(client_id),
+			'Packet Size': raw_packet_size,
 			'Number': self._get_packet_number_repr(packet_number),
-			'Keyword': packet_keyword,
-			'Payload': payload_words
-		})
+			'Keyword': packet_keyword
+		}
+		
+		if amount_of_byte_words == 0:
+			log_data['Raw Packet ({0} Bytes)'.format(raw_packet_size)] = self._get_raw_packet_representation(raw_packet)
+		else:
+			log_data['Payload ({0} Words)'.format(amount_of_byte_words)] = self._get_payload_representation(payload_words)
+		
+		self.log(self.LOG_NAME_SEND, None, log_data)
 		
 		return
 		
@@ -228,7 +333,7 @@ class Monitoring:
 		super().base_client_event_on_session_establishing(session_id)
 
 		self.log(self.LOG_NAME_INIT, 'SESSION ESTABLISHING (2/3): Received session id from server.', {
-			'SID': self._get_session_id_repr(session_id)
+			'Session ID': self._get_session_id_repr(session_id)
 		})
 
 		return
@@ -256,8 +361,8 @@ class Monitoring:
 		super().base_server_event_on_session_request(client_id, session_id, client_ip, client_port)
 		
 		self.log(self.LOG_NAME_INIT, 'REQUEST SESSION (1/3): Client asked server to respond with an encrypted session id.', {
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id),
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
 		})
@@ -268,8 +373,8 @@ class Monitoring:
 		super().base_server_event_on_session_established(client_id, session_id)
 		
 		self.log(self.LOG_NAME_INIT, 'SESSION ESTABLISHED (3/3): Client confirmed receipt of session id.', {
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id)
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id)
 		})
 		
 		return
@@ -279,8 +384,8 @@ class Monitoring:
 		
 		self.log(self.LOG_NAME_QUIT, 'Client unregistered.', {
 			'Reason': self.get_client_unregister_reason_name_by_number(reason, ''),
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id),
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id),
 			'IP': client_ip,
 			'Port': client_port
 		})
@@ -297,6 +402,37 @@ class Monitoring:
 	"""
 	Events from NeutrinoReliable
 	"""
+	def reliable_event_on_packet_received(self, client_id: Optional[int], session_id: int, remote_addr_pair: tuple, packet_type: int, packet_number: int, packet_keyword: int, payload_words: list) -> None:
+		super().reliable_event_on_packet_received(client_id, session_id, remote_addr_pair, packet_type, packet_number, packet_keyword, payload_words)
+		
+		if packet_type in self.SUPPRESS_LIST_PACKET_TYPES:
+			return		
+		
+		# Raw packet size
+		raw_packet_size = 0
+		
+		# Amount of payload byte words
+		amount_of_byte_words = len(payload_words)
+		
+		# The actual client id or None for the server (converted to -1)
+		endpoint_id = client_id or -1
+		
+		log_data = {
+			self.get_packet_name_by_type(packet_type): self._get_default_int_repr(packet_type),
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_default_int_repr(client_id),
+			'Packet Size': raw_packet_size,
+			'Number': self._get_packet_number_repr(packet_number),
+			'Keyword': packet_keyword
+		}
+		
+		log_data['Payload ({0} Words)'.format(amount_of_byte_words)] = self._get_payload_representation(payload_words)
+		log_data['Buffers'] = 'In: {0} / Out: {1}'.format(len(self.buffer_incoming[endpoint_id]['packets']), len(self.buffer_outgoing[endpoint_id]['packets']))
+		
+		self.log(self.LOG_NAME_RECV_RELIABLE, None, log_data)
+		
+		return	
+		
 	def reliable_event_on_packet_retransmission_requested(self, client_id: Optional[int], session_id: int, packet_numbers_for_retransmission: list) -> None:
 		super().reliable_event_on_packet_retransmission_requested(client_id, session_id, packet_numbers_for_retransmission)
 		
@@ -309,8 +445,8 @@ class Monitoring:
 		
 		self.log(self.LOG_NAME_RETR, 'Retransmission of {0} packet(s) requested due to probable loss.'.format(len(packet_numbers_for_retransmission)), {
 			'Packet Number(s)': packet_numbers,
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id)
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id)
 		})
 		
 		return
@@ -321,8 +457,8 @@ class Monitoring:
 		self.log(self.LOG_NAME_RETR, 'Packet retransmitted due to probable loss.', {
 			'Number': self._get_packet_number_repr(retransmitted_packet_number),
 			'Type': self.get_packet_name_by_type(retransmitted_packet_type) + ' ({0})'.format(self._get_default_int_repr(retransmitted_packet_type)),
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id)
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id)
 		})
 		
 		return
@@ -333,8 +469,8 @@ class Monitoring:
 		self.log(self.LOG_NAME_DUPLICATE, 'Duplicate packet detected.', {
 			'Duplicate Packet Number': self._get_packet_number_repr(received_packet_number) + ' ({0})'.format(self._get_default_int_repr(received_packet_type)),
 			'Expected Packet Number': self._get_packet_number_repr(expected_packet_number),
-			'SID': self._get_session_id_repr(session_id),
-			'CID': self._get_client_id_repr(client_id)
+			'Session ID': self._get_session_id_repr(session_id),
+			'Client ID': self._get_client_id_repr(client_id)
 		})
 		
 		return
