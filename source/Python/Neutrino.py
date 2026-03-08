@@ -35,7 +35,7 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 	Code Styling
 	  - Type hints for class variables, but none for function variables.
 	  - Type hints for function arguments and return values.
-	  - Tabs instead of spaces
+	  - Tabs instead of spaces.
 	  
 	Requirements / Dependencies
 	  - Python >= 3.7
@@ -650,7 +650,14 @@ class Neutrino:
 	Payload starts with amount of words (u8 bit), following with n words starting with
 	the word length. Using delimiters would not be safe.
 		
-		<[Number of Words = u8 bit (1)] [n * [Word Length = u16 bit (2)] [Word = ? bit]]>
+		PAYLOAD(
+		   [Amount of Payload Words = u8 bit (1 byte)]
+		   for word_number_n=0 to [Amount of Payload Words]
+		   WORD_N(
+			  [Playload Word Size = u16 bit (2 bytes)]
+			  [Word = ? bytes]
+		   )
+		)
 	
 	"""
 	def _pack(self, format: str, *args) -> bytes:
@@ -797,6 +804,15 @@ class Neutrino:
 			
 		return (packet_type, session_id)
 	
+	# Decode the (usually previously) decrypted right part of the packet header
+	def _decode_and_validate_decrypted_packet_header(self, raw_packet: bytes) -> tuple:
+		try:
+			(packet_number, packet_keyword) = self._unpack(self.HEADER_FORMAT_RIGHT, raw_packet[self.HEADER_SIZE_LEFT:(self.HEADER_SIZE_LEFT + self.HEADER_SIZE_RIGHT)])
+		except struct.error as message:
+			raise ex.NetworkError.InvalidPacket(('Malformed header (decrypted part).', message)) from None
+			
+		return (packet_number, packet_keyword)	
+	
 	# Combined call of self._decode_and_validate_decrypted_packet_[header|payload]()
 	def _decode_and_validate_decrypted_packet_header_and_payload(self, raw_packet: bytes) -> tuple:
 		# Packet number and keyword
@@ -806,15 +822,6 @@ class Neutrino:
 		payload_words = self._decode_and_validate_decrypted_packet_payload(raw_packet)
 		
 		return (packet_number, packet_keyword, payload_words)
-	
-	# Decode the (usually previously) decrypted right part of the packet header
-	def _decode_and_validate_decrypted_packet_header(self, raw_packet: bytes) -> tuple:
-		try:
-			(packet_number, packet_keyword) = self._unpack(self.HEADER_FORMAT_RIGHT, raw_packet[self.HEADER_SIZE_LEFT:(self.HEADER_SIZE_LEFT + self.HEADER_SIZE_RIGHT)])
-		except struct.error as message:
-			raise ex.NetworkError.InvalidPacket(('Malformed header (decrypted part).', message)) from None
-			
-		return (packet_number, packet_keyword)
 		
 	# Decode the (usually previously) decrypted payload of the packet
 	def _decode_and_validate_decrypted_packet_payload(self, raw_packet: bytes) -> tuple:
@@ -852,7 +859,7 @@ class Neutrino:
 				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
 				offset += byte_word_length
 			except struct.error as e:
-				raise ex.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word <{0}/{1}>, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
+				raise ex.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word {0} of {1}, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
 		
 		"""
 		# The right side of the payload needs to be either empty *or* only consist of PACKET_PADDING_CHAR bytes,
