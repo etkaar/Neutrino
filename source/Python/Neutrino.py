@@ -824,7 +824,7 @@ class Neutrino:
 		return (packet_number, packet_keyword, payload_words)
 		
 	# Decode the (usually previously) decrypted payload of the packet
-	def _decode_and_validate_decrypted_packet_payload(self, raw_packet: bytes) -> tuple:
+	def _decode_and_validate_decrypted_packet_payload(self, raw_packet: bytes) -> list:
 		# Payload is the rest of the packet
 		payload_bytes = raw_packet[self.TOTAL_HEADER_SIZE:]
 		
