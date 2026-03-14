@@ -852,8 +852,8 @@ class Neutrino:
 				(byte_word_length,) = self._unpack(self.FORMAT_CHAR_MAX_PAYLOAD_WORD_SIZE, payload_bytes[offset:(offset + self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES)])
 				offset += self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES
 				
-				if byte_word_length <= 0:
-					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' for word {0} of {1} rendered to an invalid value. Got {2}, but expected a value between 1 and {3}. Total payload size: {4} bytes.".format((x + 1), amount_of_byte_words, byte_word_length, self.MAX_PAYLOAD_WORD_SIZE, payload_bytes_size))
+				if byte_word_length < 0:
+					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' for word {0} of {1} rendered to an invalid value. Got {2}, but expected a value between 0 and {3}. Total payload size: {4} bytes.".format((x + 1), amount_of_byte_words, byte_word_length, self.MAX_PAYLOAD_WORD_SIZE, payload_bytes_size))
 				
 				# Byte word ([Word = ? bytes])
 				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
