@@ -853,13 +853,13 @@ class Neutrino:
 				offset += self.MAX_PAYLOAD_WORD_SIZE_IN_BYTES
 				
 				if byte_word_length <= 0:
-					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' rendered to an invalid value. Got {0}, but expected a value between 1 and {1}.".format(byte_word_length, self.MAX_PAYLOAD_WORD_SIZE))
+					raise ex.NetworkError.InvalidPacket("Malformed payload: 'byte_word_length' for word {0} of {1} rendered to an invalid value. Got {2}, but expected a value between 1 and {3}. Total payload size: {4} bytes.".format((x + 1), amount_of_byte_words, byte_word_length, self.MAX_PAYLOAD_WORD_SIZE, payload_bytes_size))
 				
 				# Byte word ([Word = ? bytes])
 				payload_words.append(payload_bytes[offset:(offset + byte_word_length)])
 				offset += byte_word_length
 			except struct.error as e:
-				raise ex.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word {0} of {1}, expected range {2}–{3}, total packet size: {4} bytes.".format(x, amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
+				raise ex.NetworkError.InvalidPacket("Malformed payload: Cannot unpack word {0} of {1}, expected range {2}–{3}, total payload size: {4} bytes.".format((x + 1), amount_of_byte_words, offset, (offset + byte_word_length), payload_bytes_size), e) from None
 		
 		"""
 		# The right side of the payload needs to be either empty *or* only consist of PACKET_PADDING_CHAR bytes,
@@ -951,7 +951,7 @@ class Neutrino:
 		
 		# Early catch of errors
 		if not self.client_session_id and self._is_valid_client_session_id(session_id) and packet_type not in [self.PACKET_TYPE_SERVER_HELLO2]:
-			raise ex.NetworkError.UnexpectedPacket('Server packet <packet_type:session_id> <{0}:{1}> not expected at this stage. This can be caused by high network delays.'.format(self._get_default_int_repr(packet_type), self._get_default_int_repr(session_id)))
+			raise ex.NetworkError.UnexpectedPacket('Server packet <packet_type:session_id> <{0}:{1}> not expected at this stage. This can be caused by high network delays or network loss.'.format(self._get_default_int_repr(packet_type), self._get_default_int_repr(session_id)))
 			
 		# Only, if session id must be given
 		if self._is_not_pending_client_session_id(session_id):
